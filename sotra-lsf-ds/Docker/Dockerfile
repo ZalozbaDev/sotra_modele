@@ -5,6 +5,7 @@ WORKDIR /app
 RUN pip config --user set global.progress_bar off
 RUN pip install Cython
 RUN pip install flask
+RUN pip install flask-cors
 RUN pip install ctranslate2
 RUN pip install sacremoses
 RUN pip install sentence_splitter
