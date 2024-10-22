@@ -5,7 +5,7 @@
 - Dokumentation, Modelle, Wortlisten o. ä.: Creative Commons CC BY-SA 3.0, siehe https://creativecommons.org/licenses/by-sa/3.0/de/ 
 
     > Vorlage für die Namensnennung:
-    >
+    > ---
     >
     > Bereitgestellt vom Witaj-Sprachzentrum, Domowina  Bund Lausitzer Sorben e. V.
     >
@@ -14,10 +14,9 @@
     > https://www.witaj-sprachzentrum.de/
     >
     > sekretariat@witaj.domowina.de
-    >
-    >
+
     > Předłoha za mjenowanje:
-    >
+    > ---
     >
     > Poskićene wot Rěčneho centruma WITAJ, Domowina  Zwjazk Łužiskich Serbow z. t.
     >
