@@ -9,7 +9,7 @@ import os
 import re
 
 
-version = "1.2.2 2024-03-20"
+version = "1.2.3 2024-11-09"
 
 os.environ["MKL_CBWR"] = "AUTO,STRICT"
 #os.environ["MKL_CBWR"] = "COMPATIBLE"
@@ -28,7 +28,7 @@ class FairseqCTranslateRunner:
         self.modeldir2 = "witaj_mm_dsb_2022-09-18/"
         self.modeldir3 = "witaj_mm_cs_2023-02-17/"
         #self.modeldir4 = "witaj_ol_hsb_de_2023-02-26/"
-        self.modeldir5 = "witaj_ol_hsb_de_2023-02-28/"
+        #self.modeldir5 = "witaj_ol_hsb_de_2023-02-28/"
         self.modeldir6 = "witaj_mm_cs_2023-05-08/"
         
         self.modelpath_default = {
@@ -45,7 +45,7 @@ class FairseqCTranslateRunner:
         }
 
         self.modelpath_test = {
-           "hsb_de": self.modeldir5+"hsb2de/",
+          # "hsb_de": self.modeldir5+"hsb2de/",
         }
         #fname=self.modeldir+self.modeldir4+"hsb2de/"
         #print(fname)
@@ -103,6 +103,36 @@ class FairseqCTranslateRunner:
     def add_language_token(self, text, trg_lng):
         return ["<" + trg_lng + ">"] + text
 
+    def split_sentences(self, text, language):
+        #print("text: "+text)
+
+        if not text.endswith("\n"):
+                text = text+"\n" # abschließender Zeilentrenner ist für die weiteren Schritte Voraussetzung ...
+
+        # mark the sentences as described in Schnittstelle_Webserver_Translationscript.docx (¶ stands for newline (i. e. end of paragraph), ┊ stands for new sentence as part of a paragraph)
+        marked_lines = re.split("(\n+)", text.replace("¶", "")) # keep the split delimiter ...
+        marked_lines = [line.replace("\n", "¶") for line in marked_lines ]  # replace sequences \n+ by ¶+
+        #print ("#0: ",str(marked_lines))
+        #print ("#1: ",("".join(marked_lines).replace("\n", "\\n")))
+        marked_lines1=[]
+        # marked_lines enthält abwechselnd die Zeileninhalte selbst und die Zeilentrennersequenzen ¶+. 
+        # In diesem Schritt werden Zeileninhalte und Zeilentrennersequenzen zusammengefügt
+        for i in range(0,len(marked_lines)-1,2):
+            if marked_lines[i] != "": # kann nur beim letzten Eintrag in der Liste auftreten
+                marked_lines1.append(marked_lines[i]+marked_lines[i+1])
+        #print ("#2: "+("".join(marked_lines1).replace("\n", "\\n")))
+
+        marked_lines  = marked_lines1
+        marked_lines = [self.sentence_splitter[language].split(
+            line) for line in marked_lines] # marked_lines ist jetzt ein Array of Arrays ...
+        #print ("marked_lines: "+str(marked_lines))
+        # flatten the list; ┊ stands for end of sentence
+        marked_lines = [
+            item + "┊" for sublist in marked_lines for item in sublist]
+        marked_lines = [line.replace("¶┊", "¶") for line in marked_lines]
+        #print("marked_lines: "+str(marked_lines))
+        return marked_lines
+
     def translate(self, source, src_lng, trg_lng, model_env):
         direction = src_lng + "_" + trg_lng
         modelpath = self.modelpath_default
@@ -128,32 +158,9 @@ class FairseqCTranslateRunner:
             marked_lines = source.split("\n")
             marked_lines = [line.strip() for line in marked_lines] 
             source = "\n".join(marked_lines)
-            if not source.endswith("\n"):
-                source = source+"\n" # abschließender Zeilentrenner ist für die weiteren Schritte Voraussetzung ...
 
-            # mark the sentences as described in Schnittstelle_Webserver_Translationscript.docx (¶ stands for newline (i. e. end of paragraph), ┊ stands for new sentence as part of a paragraph)
-            marked_lines = re.split("(\n+)", source.replace("¶", "")) # keep the split delimiter ...
-            marked_lines = [line.replace("\n", "¶") for line in marked_lines ]  # replace sequences \n+ by ¶+
-            #print ("source: ",source.replace("\n", "\\n"))
-            #print ("#0: ",str(marked_lines))
-            #print ("#1: ",("".join(marked_lines).replace("\n", "\\n")))
-            marked_lines1=[]
-            # marked_lines enthält abwechselnd die Zeileninhalte selbst und die Zeilentrennersequenzen ¶+. 
-            # In diesem Schritt werden Zeileninhalte und Zeilentrennersequenzen zusammengefügt
-            for i in range(0,len(marked_lines)-1,2):
-                if marked_lines[i] != "": # kann nur beim letzten Eintrag in der Liste auftreten
-                    marked_lines1.append(marked_lines[i]+marked_lines[i+1])
-            #print ("#2: ",("".join(marked_lines1).replace("\n", "\\n")))
+            marked_lines=self.split_sentences(source, src_lng)
 
-            marked_lines  = marked_lines1
-            marked_lines = [self.sentence_splitter[src_lng].split(
-                line) for line in marked_lines] # marked_lines ist jetzt ein Array of Arrays ...
-            #print ("marked_lines4: ",str(marked_lines))
-            # flatten the list; ┊ stands for end of sentence
-            marked_lines = [
-                item + "┊" for sublist in marked_lines for item in sublist]
-            marked_lines = [line.replace("¶┊", "¶") for line in marked_lines]
-            # print(marked_lines)
             sentences = [line.replace("¶", "").replace("┊", "")
                         for line in marked_lines]
 
@@ -297,7 +304,15 @@ if __name__ == "__main__":
                     f.close()
         return {'modelpath_default': runner.modelpath_default, 'modelinfo_default': modelinfo_default, 'modelpath_test': runner.modelpath_test, 'modelinfo_test':modelinfo_test, 'hostname': hostname, 'srcfilename': python_filename + " (modified UTC: "+str(modified)+")", 'version': version }
 
-
+    @app.route('/split_sentences', methods=['POST'])
+    def split_sentences():
+        if request.json != None:
+            print("\nrequest", request.json, "\n")
+        text = request.json.get('text')
+        language = request.json.get('language')
+        result=runner.split_sentences(text, language)
+        retval= {'sentences':result}
+        return retval
 
     app.run('0.0.0.0', 3000)
 
