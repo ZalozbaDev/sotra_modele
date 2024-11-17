@@ -9,7 +9,7 @@ import os
 import re
 
 
-version = "1.2.3 2024-11-09"
+version = "1.2.3 2024-11-17"
 
 os.environ["MKL_CBWR"] = "AUTO,STRICT"
 #os.environ["MKL_CBWR"] = "COMPATIBLE"
@@ -272,10 +272,10 @@ if __name__ == "__main__":
             return {'error': '"text" field in JSON payload is required'}, 400
 
         text = request.json.get('text')
-        src_lng = request.json.get('source_language')
-        trg_lng = request.json.get('target_language')
+        src_lng = request.json.get('source_language', '')
+        trg_lng = request.json.get('target_language', '')
 
-        model_env = request.json.get('model_env')
+        model_env = request.json.get('model_env', '')
 
         result = runner.translate(text, src_lng, trg_lng, model_env)
         errormsg = result[6]

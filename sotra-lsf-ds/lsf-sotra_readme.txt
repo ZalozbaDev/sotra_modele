@@ -4,7 +4,7 @@ docker build -t sotra-lsf .
 2. Starten des Containers
 
 docker run -v <./models1>:/app/models1 -p 3000:3000 -d --restart always -it sotra-lsf
-(wobei <./models1> die absolute Pfadnagabe zum models1-Verzeichnis sein muss; Docker erlaubt hier keine relativen Pfadangaben)
+(wobei <./models1> die absolute Pfadangabe zum models1-Verzeichnis sein muss; Docker erlaubt hier keine relativen Pfadangaben)
 
 3. Test
 
