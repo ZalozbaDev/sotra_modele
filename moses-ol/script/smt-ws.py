@@ -1,5 +1,3 @@
-use_tts = True
-
 import flask
 from flask import request, jsonify, send_file
 #from flask_cors import CORS
@@ -104,7 +102,7 @@ def info():
 
 def err_msg(msg):
     logger.debug("errmsg " + str(msg))
-    return {"errmsg": msg}
+    return {"errormsg": msg}
 
 
 @app.route("/translate", methods=["POST"])
@@ -124,6 +122,10 @@ def translate():
         trg_lng = request.json.get('target_language', '')
         if src_lng == '' or trg_lng == '':
              return err_msg('"source_language" or "targetlanguage" field in JSON payload is required')
+
+        if not ((src_lng == 'de' and trg_lng == 'hsb') or (src_lng == 'hsb' and trg_lng == 'de')):
+             return err_msg('only \'de\' and \'hsb\' as translation language supported!')
+
 
         temp_file_in = f"./tmp/temp_file_in_{uuid.uuid4().hex}.txt"
         temp_file_src_sentence_output = f"./tmp/temp_file_src_sentence_output_{uuid.uuid4().hex}.txt"
@@ -167,7 +169,7 @@ def translate():
             )
             tb = tb.tb_next
         ret = {
-            "errmsg": "Exception",
+            "errormsg": "Exception",
             "exception": {
                 "type": type(ex).__name__,
                 "message": str(ex),
