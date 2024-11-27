@@ -1,3 +1,15 @@
+For historical reasons, the first translation system, which was used for sotra until mid-2022 and was then replaced by a neural translator, is provided here. 
+The system is based on the statistical translator "Moses" https://www2.statmt.org/moses/ .
+The following translation directions are supported:
+HSB -> DE
+DE -> HSB
+
+
+
+
+
+
+Installation:
 1.
 Unpack model.zip containing moses translation model data for the directions hsb->de and de->hsb.
 The directory structure should then look like this:
