@@ -90,9 +90,12 @@ def readFileIntoString(filename):
 def info():
     logger.debug(str(request))
     tmp_outfile = f"./tmp/{uuid.uuid4().hex}.txt"
+
     exec (f"./script/info_moses.sh {tmp_outfile}")
     data = readFileIntoString(tmp_outfile)
-    res = {"webservice_version": "0.0.1", "moses_info": data}
+    string_array = data.split("\n")
+    string_array1 = list(filter(lambda x: len(x) > 0, string_array))
+    res = {"webservice_version": "0.0.1", "moses_info": string_array1}
     files=[]
     files.append(tmp_outfile)
     delete_temp_files(files)
