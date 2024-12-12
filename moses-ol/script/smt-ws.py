@@ -13,39 +13,6 @@ import subprocess
 
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
-
-logger = None
-
-
-def init_logging(logdir):
-    global logger
-    # create logger
-    logger = logging.getLogger("log_smt")
-
-    # set logging level
-    logger.setLevel(logging.DEBUG)
-
-    # create formatter
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-
-    stream_handler = logging.StreamHandler(stream=sys.stdout)
-    stream_handler.setLevel(logging.DEBUG)
-    stream_handler.setFormatter(formatter)
-    # create rotating file handler and set level to debug
-
-    rot_handler = RotatingFileHandler(
-        logdir + "/smt.log", maxBytes=20000000, backupCount=10,
-    )
-    rot_handler.setLevel(logging.DEBUG)
-    rot_handler.setFormatter(formatter)
-
-    logger.addHandler(stream_handler)
-    logger.addHandler(rot_handler)
-
-    logger.debug("logging initialized")
 
 
 
@@ -55,7 +22,7 @@ app = flask.Flask(__name__)
 # CORS
 def init_app():
     #CORS(app)
-    logger.debug("app initialized")
+    logging.info("app initialized")
 
 
 
@@ -69,9 +36,9 @@ def delete_temp_files(files):
     
 
 def exec(cmd):
-    logger.debug(f">>> exec {cmd}")
+    logging.info(f">>> exec {cmd}")
     subprocess.run(cmd, shell=True, check=True)
-    logger.debug(f"<<< exec")
+    logging.info(f"<<< exec")
 
 
 def writeStringToFile(str, filename):
@@ -88,14 +55,14 @@ def readFileIntoString(filename):
 
 @app.route("/info", methods=["GET"])
 def info():
-    logger.debug(str(request))
+    logging.info(str(request))
     tmp_outfile = f"./tmp/{uuid.uuid4().hex}.txt"
 
     exec (f"./script/info_moses.sh {tmp_outfile}")
     data = readFileIntoString(tmp_outfile)
     string_array = data.split("\n")
     string_array1 = list(filter(lambda x: len(x) > 0, string_array))
-    res = {"webservice_version": "0.0.1", "moses_info": string_array1}
+    res = {"webservice_version": "0.0.2", "moses_info": string_array1}
     files=[]
     files.append(tmp_outfile)
     delete_temp_files(files)
@@ -104,14 +71,14 @@ def info():
 
 
 def err_msg(msg):
-    logger.debug("errmsg " + str(msg))
+    logging.info("errmsg " + str(msg))
     return {"errormsg": msg}
 
 
 @app.route("/translate", methods=["POST"])
 def translate():
-    logger.debug(str(request))
-    logger.debug("request json payload: " + str(request.json))
+    logging.info(str(request))
+    logging.info("request json payload: " + str(request.json))
 
     try:
         if request.json != None:
@@ -179,7 +146,7 @@ def translate():
                 "trace": trace,
             },
         }
-        logger.debug("Exception: " + str(ret))
+        logging.info("Exception: " + str(ret))
         return ret
 
 
@@ -193,8 +160,7 @@ if __name__ == "__main__":
 
     print("logdir is " + logdir)
 
-    init_logging(logdir)
     init_app()
-    logger.debug("starting webserver ...")
+    logging.info("starting webserver ...")
     app.run(port=int(os.environ.get("PORT", 8080)), host="0.0.0.0", debug=False)
-    logger.debug("exiting ...")
+    logging.info("exiting ...")
