@@ -1,0 +1,15 @@
+FROM python:3.9.7
+
+# docker build -t sotra_libretranslate .
+
+WORKDIR /app
+
+RUN pip config --user set global.progress_bar off
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY sentence_splitter/non_breaking_prefixes /app/sentence_splitter/non_breaking_prefixes
+
+COPY libretranslate_compatible_server.py .
+
+CMD ["python3", "libretranslate_compatible_server.py"]

@@ -1,0 +1,7 @@
+Cython
+flask
+flask-cors
+ctranslate2
+sacremoses
+sentence_splitter
+youtokentome
