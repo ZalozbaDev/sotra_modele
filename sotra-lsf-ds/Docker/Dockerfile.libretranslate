@@ -16,4 +16,4 @@ COPY inference_new2.py .
 RUN mkdir models1/
 COPY models1 models1/
 
-CMD ["python3", "libretranslate_compatible_server.py"]
+CMD ["python3", "inference_new2.py"]

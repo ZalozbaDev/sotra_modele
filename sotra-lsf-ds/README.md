@@ -19,4 +19,8 @@ bzw.
 
 `curl -X POST http://localhost:3000/translate -H "Content-Type: application/json" -d '{"text": "To je test.","source_language": "hsb", "target_language": "de"}'`
 
+## Libretranslate API (for Jitsi Meet compatibility)
+
+`curl -X POST http://localhost:3000/libretranslate -H "Content-Type: application/json" -d '{"q": "To je test.","source": "hsb", "target": "de", "format": "text"}'`
+
 
