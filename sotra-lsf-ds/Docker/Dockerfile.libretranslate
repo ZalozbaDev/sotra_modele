@@ -11,5 +11,6 @@ RUN pip install -r requirements.txt
 COPY sentence_splitter/non_breaking_prefixes /app/sentence_splitter/non_breaking_prefixes
 
 COPY libretranslate_compatible_server.py .
+COPY inference_new2.py .
 
 CMD ["python3", "libretranslate_compatible_server.py"]
