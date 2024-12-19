@@ -13,4 +13,6 @@ COPY sentence_splitter/non_breaking_prefixes /app/sentence_splitter/non_breaking
 COPY libretranslate_compatible_server.py .
 COPY inference_new2.py .
 
+COPY models1 .
+
 CMD ["python3", "libretranslate_compatible_server.py"]
