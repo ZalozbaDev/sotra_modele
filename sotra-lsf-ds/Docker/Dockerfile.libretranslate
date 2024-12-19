@@ -1,6 +1,6 @@
 FROM python:3.9.7
 
-# docker build -t sotra_libretranslate .
+# docker build -f Dockerfile.libretranslate -t sotra_libretranslate .
 
 WORKDIR /app
 
