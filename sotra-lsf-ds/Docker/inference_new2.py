@@ -9,7 +9,7 @@ import os
 import re
 
 
-version = "1.2.3 2024-11-17"
+version = "1.2.4 2024-12-20"
 
 os.environ["MKL_CBWR"] = "AUTO,STRICT"
 #os.environ["MKL_CBWR"] = "COMPATIBLE"
@@ -104,21 +104,22 @@ class FairseqCTranslateRunner:
         return ["<" + trg_lng + ">"] + text
 
     def split_sentences(self, text, language):
-        #print("text: "+text)
+        #print("split_sentences: "+text)
 
         if not text.endswith("\n"):
                 text = text+"\n" # abschließender Zeilentrenner ist für die weiteren Schritte Voraussetzung ...
 
         # mark the sentences as described in Schnittstelle_Webserver_Translationscript.docx (¶ stands for newline (i. e. end of paragraph), ┊ stands for new sentence as part of a paragraph)
-        marked_lines = re.split("(\n+)", text.replace("¶", "")) # keep the split delimiter ...
+        marked_lines = re.split("(\n)", text.replace("¶", "")) # keep the split delimiter ...
+        #print ("#0a: ",str(marked_lines))
         marked_lines = [line.replace("\n", "¶") for line in marked_lines ]  # replace sequences \n+ by ¶+
-        #print ("#0: ",str(marked_lines))
+        #print ("#0b: ",str(marked_lines))
         #print ("#1: ",("".join(marked_lines).replace("\n", "\\n")))
         marked_lines1=[]
         # marked_lines enthält abwechselnd die Zeileninhalte selbst und die Zeilentrennersequenzen ¶+. 
         # In diesem Schritt werden Zeileninhalte und Zeilentrennersequenzen zusammengefügt
         for i in range(0,len(marked_lines)-1,2):
-            if marked_lines[i] != "": # kann nur beim letzten Eintrag in der Liste auftreten
+            if marked_lines[i] != "" or i < len(marked_lines)-1:
                 marked_lines1.append(marked_lines[i]+marked_lines[i+1])
         #print ("#2: "+("".join(marked_lines1).replace("\n", "\\n")))
 
@@ -213,12 +214,16 @@ class FairseqCTranslateRunner:
             marked_translations = []
             for ix, translation in enumerate(translations):
                 marked_input_line = marked_lines[ix]
-                marked_translation = translation
+                unmarked_input = marked_input_line.replace("¶", "").replace("┊", "")
+                if unmarked_input == "":
+                    marked_translation = "" # Wenn die Eingabezeile leer war, dann lösche die Übersetzung (falls der Übersetzter halluzinierte ...)
+                else:
+                    marked_translation = translation
                 end_marker = ""
                 if marked_input_line.endswith("┊"):
                     end_marker = "┊"
                 elif marked_input_line.endswith("¶"):
-                    end_marker = re.split("(¶+)", marked_input_line)[1] # end_marker kann auch eine sequenz von Zeilenschaltungen sein
+                    end_marker = re.split("(¶+)", marked_input_line)[1] # end_marker kann auch eine sequenz von Zeilenschaltungen sein (kann eigentlich nicht passieren ...)
                 marked_translations.append(marked_translation+end_marker)
 
             #print("#end:\n"+str(marked_translations))
