@@ -274,7 +274,7 @@ if __name__ == "__main__":
         text = request.json.get('text')
         src_lng = request.json.get('source_language', '')
         trg_lng = request.json.get('target_language', '')
-
+        
         model_env = request.json.get('model_env', '')
 
         result = runner.translate(text, src_lng, trg_lng, model_env)
@@ -306,6 +306,17 @@ if __name__ == "__main__":
         src_lng = request.json.get('source')
         trg_lng = request.json.get('target')
 
+        # Hack for Jitsi / Jigasi / Libretranslate API
+        if src_lng == "hs":
+            src_lng = "hsb"
+        elif src_lng == "ds":
+            src_lng = "dsb"
+
+        if trg_lng == "hs":
+            trg_lng = "hsb"
+        elif trg_lng == "ds":
+            trg_lng = "dsb"
+            
         if src_lng == 'auto':
             return {'error': f'Automatic language detection is not supported'}, 500
 
