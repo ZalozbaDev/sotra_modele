@@ -4,9 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - 'main'
-      # allow running for libretranslate
-      - 'libretranslate_api'
+      - 'fix__ctranslator_startup'
     tags:
       - "v*"
   schedule:
