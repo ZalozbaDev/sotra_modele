@@ -19,5 +19,6 @@ COPY nonbreaking_prefixes/nonbreaking_prefix.* /usr/local/lib/python3.9/site-pac
 COPY nonbreaking_prefixes/protected_pattern /usr/local/lib/python3.9/site-packages/mosestokenizer/share
 
 COPY CTranslator.py /app/
+COPY version.txt    /app/
 
 CMD ["python", "CTranslator.py"]

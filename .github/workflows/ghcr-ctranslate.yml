@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - 'fix__ctranslator_startup'
+      - 'fix_ctranslator_startup'
     tags:
       - "v*"
   schedule:
