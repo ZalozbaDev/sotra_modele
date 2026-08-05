@@ -13,12 +13,19 @@ RUN pip install ctranslate2
 RUN pip install youtokentome
 RUN pip install ruamel.yaml
 
-COPY models /app/models
-
 COPY nonbreaking_prefixes/nonbreaking_prefix.* /usr/local/lib/python3.9/site-packages/mosestokenizer/share/nonbreaking_prefixes/
 COPY nonbreaking_prefixes/protected_pattern /usr/local/lib/python3.9/site-packages/mosestokenizer/share
 
-COPY CTranslator.py /app/
-COPY version.txt    /app/
+RUN useradd -u 1000 -m ctranslate
+
+COPY --chown=1000:1000 CTranslator.py /app/
+COPY --chown=1000:1000 version.txt    /app/
+COPY --chown=1000:1000 models         /app/models
+
+USER 1000
+
+#COPY CTranslator.py /app/
+#COPY version.txt    /app/
+#COPY models /app/models
 
 CMD ["python", "CTranslator.py"]
