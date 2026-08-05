@@ -16,13 +16,13 @@ RUN pip install ruamel.yaml
 COPY nonbreaking_prefixes/nonbreaking_prefix.* /usr/local/lib/python3.9/site-packages/mosestokenizer/share/nonbreaking_prefixes/
 COPY nonbreaking_prefixes/protected_pattern /usr/local/lib/python3.9/site-packages/mosestokenizer/share
 
-RUN useradd -u 1000 -m ctranslate
+RUN useradd -u 1000 -m ctranslate
 
-COPY --chown=1000:1000 CTranslator.py /app/
-COPY --chown=1000:1000 version.txt    /app/
-COPY --chown=1000:1000 models         /app/models
+COPY --chown=1000:1000 CTranslator.py /app/
+COPY --chown=1000:1000 version.txt    /app/
+COPY --chown=1000:1000 models         /app/models
 
-USER 1000
+USER 1000
 
 #COPY CTranslator.py /app/
 #COPY version.txt    /app/
