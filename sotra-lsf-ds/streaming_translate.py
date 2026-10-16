@@ -52,6 +52,8 @@ REQUEST_DELAY = 0.0
 
 STEPS=False
 
+LINELEN_FUZZY_MATCH = 50
+
 # ------------------------------------------------------------
 # Übersetzungsdienst
 # ------------------------------------------------------------
@@ -149,6 +151,78 @@ def find_stable_prefix(translations):
 
     return ""
 
+def force_stable_prefix(translations):
+    """
+    Erzwingt die Festlegung eines deutschen Textsegments,
+    wenn die normale Stabilitätserkennung nicht erfolgreich ist.
+
+    Strategie:
+    1. Längsten gemeinsamen Präfix der Historie bestimmen.
+    2. Wenn möglich, an einer Satzgrenze abschneiden.
+    3. Andernfalls den Anfang der letzten Übersetzung
+       bis zu einer Wortgrenze verwenden.
+
+    Rückgabe:
+        Ein nichtleerer deutscher Textanfang oder "".
+    """
+
+    if not translations:
+        return ""
+
+    # Zunächst den gemeinsamen Präfix der gesamten Historie
+    # bestimmen. Das kann auch bei abweichenden Übersetzungen
+    # einen brauchbaren gemeinsamen Anfang ergeben.
+    prefix = common_prefix(translations)
+
+    if prefix.strip():
+        # Satzgrenze bevorzugen.
+        sentence_endings = [
+            prefix.rfind("."),
+            prefix.rfind("!"),
+            prefix.rfind("?")
+        ]
+
+        last_sentence_end = max(sentence_endings)
+
+        if last_sentence_end >= 0:
+            candidate = prefix[:last_sentence_end + 1].strip()
+
+            if candidate:
+                return candidate
+
+        # Sonst an der letzten vollständigen Wortgrenze.
+        last_space = prefix.rfind(" ")
+
+        if last_space > 0:
+            candidate = prefix[:last_space].strip()
+
+            if candidate:
+                return candidate
+
+    # Kein brauchbarer gemeinsamer Präfix:
+    # Anfang der aktuellsten Übersetzung verwenden.
+    latest = translations[-1].strip()
+
+    if not latest:
+        return ""
+
+    # Möglichst einen vollständigen Satz verwenden.
+    sentence_match = re.search(r"^.*?[.!?](?:\s|$)", latest)
+
+    if sentence_match:
+        return sentence_match.group().strip()
+
+    # Sonst den ersten Teil bis zur nächsten Wortgrenze.
+    limit = min(LINELEN_FUZZY_MATCH, len(latest))
+
+    if limit < len(latest):
+        boundary = latest.rfind(" ", 0, limit)
+
+        if boundary > 0:
+            return latest[:boundary].strip()
+
+    # Letzter Rückfall: gesamte bisherige Übersetzung.
+    return latest
 
 # ------------------------------------------------------------
 # Unscharfe Suche im Originalpuffer
@@ -283,19 +357,59 @@ def find_fuzzy_prefix(original, backtranslated):
     print(f"Beste Präfixlänge: {best_length} Wörter")
     print(f"Erforderliche Ähnlichkeit: {MIN_MATCH_RATIO:.3f}")
 
-    # Konservativ entscheiden: Bei zu geringer Ähnlichkeit
-    # wird nichts entfernt.
     if (
         best_length == 0
         or best_score < MIN_MATCH_RATIO
     ):
         print(
-            "\nKein ausreichend zuverlässiger Treffer. "
-            "Der Originalpuffer bleibt unverändert."
+            "\nKein ausreichend zuverlässiger Treffer."
+            "\nDas Abschneiden wird erzwungen."
         )
 
-        return "", original, best_score
+        # Anzahl der Wörter aus der Rückübersetzung als
+        # Schätzwert für die Länge des zu entfernenden
+        # Originalpräfixes verwenden.
+        #
+        # Bei zu wenigen Wörtern trotzdem mindestens ein
+        # Originalwort entfernen, sofern vorhanden.
+        estimated_length = max(
+            1,
+            len(translated_words)
+        )
 
+        # Niemals mehr Wörter entfernen, als vorhanden sind.
+        best_length = min(
+            estimated_length,
+            len(original_tokens)
+        )
+
+        if best_length == 0:
+            return "", original, best_score
+
+        # Zeichenposition des letzten zu entfernenden Wortes.
+        cut_position = original_tokens[best_length - 1][2]
+
+        removed_text = original[:cut_position]
+        remaining_text = original[cut_position:].lstrip()
+
+        print_section(
+            "ERZWUNGENES Abschneiden: Originalpräfix",
+            removed_text
+        )
+
+        print_section(
+            "ERZWUNGENES Abschneiden: Verbleibender Text",
+            remaining_text
+        )
+
+        print(
+            f"Warnung: Unscharfe Übereinstimmung "
+            f"{best_score:.3f} liegt unter dem Grenzwert "
+            f"{MIN_MATCH_RATIO:.3f}."
+        )
+
+        return removed_text, remaining_text, best_score
+    
     # Ende des letzten erkannten Wortes im Originaltext.
     cut_position = original_tokens[best_length - 1][2]
 
@@ -423,7 +537,7 @@ def process_file(input_file, output_file):
 
         translation_history.append(translation_de)
 
-        stored_translation_de = translation_de
+        # stored_translation_de = translation_de
 
         #print_section(
         #    "3. Gespeicherter String (de)",
@@ -438,6 +552,26 @@ def process_file(input_file, output_file):
             translation_history
         )
 
+        # Prüfen, ob die normale Stabilitätserkennung gescheitert ist
+        # und der Originalpuffer die konfigurierte Schwelle erreicht hat.
+        forced_stability = False
+
+        if (
+            not stable_prefix_de
+            and len(buffer_hsb) >= LINELEN_FUZZY_MATCH
+        ):
+            stable_prefix_de = force_stable_prefix(
+                translation_history
+            )
+
+            if stable_prefix_de:
+                forced_stability = True
+
+                print_section(
+                    "DE-forced-stable:",
+                    stable_prefix_de
+                )
+
         if not stable_prefix_de:
 
             print_section(
@@ -445,17 +579,16 @@ def process_file(input_file, output_file):
                 "NONE"
             )
 
-            #output_lines.append(
-            #    f"[Segment {segment_count}]\n"
-            #    f"Original hsb: {buffer_hsb}\n"
-            #    f"Übersetzung de: {translation_de}\n"
-            #    f"Status: Noch nicht stabil\n"
-            #)
-
             if REQUEST_DELAY:
                 time.sleep(REQUEST_DELAY)
 
             continue
+
+        if forced_stability:
+            print(
+                "WARNUNG: Das deutsche Segment wurde "
+                "mangels ausreichender Stabilität erzwungen."
+            )
 
         print_section(
             "DE-final:",
@@ -547,7 +680,7 @@ def process_file(input_file, output_file):
         #    f"Originalpuffer vorher: {old_buffer_hsb}\n"
         #    f"Originalpuffer nachher: {buffer_hsb}\n"
         #)
-        output_lines.append(f"{stable_prefix_de}\n")
+        output_lines.append(f"{stable_prefix_de}")
 
         # Die Historie wird nach erfolgreicher Kürzung
         # zurückgesetzt, da nun ein neuer Textanfang vorliegt.
@@ -590,7 +723,7 @@ def process_file(input_file, output_file):
         #    f"Verbleibender Originaltext hsb: {buffer_hsb}\n"
         #    f"Übersetzung de: {final_translation_de}\n"
         #)
-        output_lines.append(f"{final_translation_de}\n")
+        output_lines.append(f"{final_translation_de}")
 
 
     #else:
