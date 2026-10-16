@@ -29,7 +29,7 @@ TARGET_LANG = "de"
 TRANSLATION_URL = "http://localhost:3000/translate"
 
 STABILITY_WINDOW = 3
-MIN_STABLE_LENGTH = 15
+MIN_STABLE_LENGTH = 20
 
 MIN_MATCH_RATIO = 0.40
 MIN_MATCH_WORDS = 4
@@ -37,7 +37,7 @@ MIN_MATCH_WORDS = 4
 REQUEST_DELAY = 0.0
 STEPS = False
 
-LINELEN_FUZZY_MATCH = 60
+WORD_COUNT_FUZZY_MATCH = 10
 
 # Eine ursprüngliche Zeilengrenze darf bevorzugt werden, wenn
 # ihre Ähnlichkeit höchstens so weit unter dem besten Treffer liegt.
@@ -215,13 +215,14 @@ def force_stable_prefix(translations, line_boundary_history=None):
     if latest_sentences:
         return latest_sentences[0]
 
-    limit = min(LINELEN_FUZZY_MATCH, len(latest))
-    candidate = latest[:limit]
-
-    if limit < len(latest):
-        boundary = candidate.rfind(" ")
-        if boundary > 0:
-            candidate = candidate[:boundary]
+    # Den erzwungenen Fallback anhand einer Wortanzahl statt einer
+    # Zeichenlänge begrenzen.
+    latest_tokens = tokenize_with_positions(latest)
+    if len(latest_tokens) > WORD_COUNT_FUZZY_MATCH:
+        cut_position = latest_tokens[WORD_COUNT_FUZZY_MATCH - 1][2]
+        candidate = latest[:cut_position]
+    else:
+        candidate = latest
 
     return candidate.strip() or latest
 
@@ -600,7 +601,7 @@ def process_file(input_file, output_file):
 
         if (
             not stable_prefix_de
-            and len(buffer_hsb) >= LINELEN_FUZZY_MATCH
+            and len(tokenize_with_positions(buffer_hsb)) >= WORD_COUNT_FUZZY_MATCH
         ):
             stable_prefix_de = force_stable_prefix(
                 translation_history,
