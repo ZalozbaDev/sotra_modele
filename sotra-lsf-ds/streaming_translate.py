@@ -39,7 +39,7 @@ TARGET_LANG = "de"
 TRANSLATION_URL = "http://localhost:3000/translate"
 
 STABILITY_WINDOW = 3
-MIN_STABLE_LENGTH = 20
+MIN_STABLE_LENGTH = 15
 
 # Mindestähnlichkeit für die unscharfe Suche.
 # Wertebereich: 0.0 bis 1.0
@@ -52,7 +52,7 @@ REQUEST_DELAY = 0.0
 
 STEPS=False
 
-LINELEN_FUZZY_MATCH = 50
+LINELEN_FUZZY_MATCH = 60
 
 # ------------------------------------------------------------
 # Übersetzungsdienst
@@ -64,7 +64,19 @@ def translate_text(
     target_lang,
     url=TRANSLATION_URL
 ):
-    """Sendet Text an den Übersetzungsdienst."""
+    """Sendet Text an den Übersetzungsdienst.
+
+    Wenn der Quelltext nicht mit einem Satzzeichen endet,
+    wird vor der Übersetzung ein Punkt angehängt.
+    """
+    if not text.strip():
+        return ""
+
+    text = text.rstrip()
+
+    # Punkt ergänzen, wenn kein Satzzeichen am Ende steht.
+    #if not re.search(r'[.!?…]["\'»”)\]]*$', text):
+    #    text += "."
 
     payload = {
         "text": text,
@@ -279,10 +291,10 @@ def find_fuzzy_prefix(original, backtranslated):
         for token in translated_tokens
     ]
 
-    print_section(
-        "Vergleich: Rückübersetzung (hsb)",
-        backtranslated
-    )
+    #print_section(
+    #    "Vergleich: Rückübersetzung (hsb)",
+    #    backtranslated
+    #)
 
     print("Wörter der Rückübersetzung:")
     print(translated_words)
@@ -353,18 +365,17 @@ def find_fuzzy_prefix(original, backtranslated):
             best_score = similarity
             best_length = candidate_length
 
-    print(f"\nBeste Ähnlichkeit: {best_score:.3f}")
-    print(f"Beste Präfixlänge: {best_length} Wörter")
-    print(f"Erforderliche Ähnlichkeit: {MIN_MATCH_RATIO:.3f}")
+    print(f"\nBeste Ähnlichkeit: {best_score:.3f} - {best_length} Wörter")
+    # print(f"Erforderliche Ähnlichkeit: {MIN_MATCH_RATIO:.3f}")
 
     if (
         best_length == 0
         or best_score < MIN_MATCH_RATIO
     ):
-        print(
-            "\nKein ausreichend zuverlässiger Treffer."
-            "\nDas Abschneiden wird erzwungen."
-        )
+        #print(
+        #    "\nKein ausreichend zuverlässiger Treffer."
+        #    "\nDas Abschneiden wird erzwungen."
+        #)
 
         # Anzahl der Wörter aus der Rückübersetzung als
         # Schätzwert für die Länge des zu entfernenden
@@ -393,20 +404,21 @@ def find_fuzzy_prefix(original, backtranslated):
         remaining_text = original[cut_position:].lstrip()
 
         print_section(
-            "ERZWUNGENES Abschneiden: Originalpräfix",
-            removed_text
+            "ERZWUNGENES Abschneiden: ",
+            f"{removed_text} | {remaining_text} - " 
+            f"{best_score:.3f} < {MIN_MATCH_RATIO:.3f}."
         )
 
-        print_section(
-            "ERZWUNGENES Abschneiden: Verbleibender Text",
-            remaining_text
-        )
+        #print_section(
+        #    "ERZWUNGENES Abschneiden: Verbleibender Text",
+        #    remaining_text
+        #)
 
-        print(
-            f"Warnung: Unscharfe Übereinstimmung "
-            f"{best_score:.3f} liegt unter dem Grenzwert "
-            f"{MIN_MATCH_RATIO:.3f}."
-        )
+        #print(
+        #    f"Warnung: Unscharfe Übereinstimmung "
+        #    f"{best_score:.3f} liegt unter dem Grenzwert "
+        #    f"{MIN_MATCH_RATIO:.3f}."
+        #)
 
         return removed_text, remaining_text, best_score
     
@@ -418,12 +430,7 @@ def find_fuzzy_prefix(original, backtranslated):
 
     print_section(
         "Gefundener Originalpräfix",
-        removed_text
-    )
-
-    print_section(
-        "Verbleibender Originaltext",
-        remaining_text
+        f"{removed_text} | {remaining_text}" 
     )
 
     return removed_text, remaining_text, best_score
@@ -567,15 +574,15 @@ def process_file(input_file, output_file):
             if stable_prefix_de:
                 forced_stability = True
 
-                print_section(
-                    "DE-forced-stable:",
-                    stable_prefix_de
-                )
+                #print_section(
+                #    "DE-forced-stable:",
+                #    stable_prefix_de
+                #)
 
         if not stable_prefix_de:
 
             print_section(
-                "DE-scanstable:",
+                "DE-NO STABLE PREFIX:",
                 "NONE"
             )
 
@@ -584,15 +591,15 @@ def process_file(input_file, output_file):
 
             continue
 
-        if forced_stability:
-            print(
-                "WARNUNG: Das deutsche Segment wurde "
-                "mangels ausreichender Stabilität erzwungen."
-            )
+        #if forced_stability:
+        #    print(
+        #        "WARNUNG: Das deutsche Segment wurde "
+        #        "mangels ausreichender Stabilität erzwungen."
+        #    )
 
         print_section(
             "DE-final:",
-            stable_prefix_de
+            f"{stable_prefix_de} - forced={forced_stability}"
         )
 
         # ----------------------------------------------------
@@ -626,22 +633,19 @@ def process_file(input_file, output_file):
         # ----------------------------------------------------
 
         print_section(
-            "7. Reduzierung des Originalpuffers (hsb)",
-            f"Vorher:\n{buffer_hsb}\n\n"
-            f"Entfernter Teil:\n"
-            f"{removed_text or '[nichts entfernt]'}\n\n"
-            f"Nachher:\n{remaining_text}"
+            "HSB-reduce",
+            f"({removed_text or '[nichts entfernt]'}) | {remaining_text}"
         )
 
         # Ohne erfolgreichen Treffer bleibt der Puffer
         # erhalten und es wird kein Commit ausgeführt.
         if not removed_text:
 
-            print(
-                "\nKein Commit: Der Originalpuffer wurde "
-                "nicht verändert. Die Suche wird bei "
-                "späteren Segmenten erneut versucht."
-            )
+            #print(
+            #    "\nKein Commit: Der Originalpuffer wurde "
+            #    "nicht verändert. Die Suche wird bei "
+            #    "späteren Segmenten erneut versucht."
+            #)
 
             #output_lines.append(
             #    f"[Segment {segment_count}]\n"
