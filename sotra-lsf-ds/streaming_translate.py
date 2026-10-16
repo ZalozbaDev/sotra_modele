@@ -4,19 +4,9 @@
 """
 Inkrementelle Übersetzung von Obersorbisch nach Deutsch.
 
-Ablauf:
-1. Segmente aus einer Textdatei zeilenweise einlesen.
-2. Im Originalpuffer (hsb) akkumulieren.
-3. Gesamten Puffer nach Deutsch übersetzen.
-4. Stabilen Anfang der deutschen Übersetzung erkennen.
-5. Stabilen deutschen Teil nach Obersorbisch zurückübersetzen.
-6. Rückübersetzung unscharf mit dem Originalpuffer vergleichen.
-7. Den passenden Anfang aus dem Originalpuffer entfernen.
-8. Mit dem verbleibenden Originalpuffer fortfahren.
-
-Wichtig:
-Der Originalpuffer wird NICHT durch eine Rückübersetzung
-des verbleibenden deutschen Textes ersetzt.
+Ursprüngliche Zeilengrenzen werden im Originalpuffer gespeichert.
+Sie unterstützen sowohl die Erkennung stabiler deutscher Sätze als
+auch die Auswahl der Kürzungsposition im obersorbischen Original.
 """
 
 import argparse
@@ -41,68 +31,57 @@ TRANSLATION_URL = "http://localhost:3000/translate"
 STABILITY_WINDOW = 3
 MIN_STABLE_LENGTH = 15
 
-# Mindestähnlichkeit für die unscharfe Suche.
-# Wertebereich: 0.0 bis 1.0
 MIN_MATCH_RATIO = 0.40
-
-# Mindestanzahl Wörter für einen zuverlässigen Vergleich.
 MIN_MATCH_WORDS = 4
 
 REQUEST_DELAY = 0.0
-
-STEPS=False
+STEPS = False
 
 LINELEN_FUZZY_MATCH = 60
+
+# Eine ursprüngliche Zeilengrenze darf bevorzugt werden, wenn
+# ihre Ähnlichkeit höchstens so weit unter dem besten Treffer liegt.
+BOUNDARY_SCORE_TOLERANCE = 0.08
+
 
 # ------------------------------------------------------------
 # Übersetzungsdienst
 # ------------------------------------------------------------
 
-def translate_text(
-    text,
-    source_lang,
-    target_lang,
-    url=TRANSLATION_URL
-):
-    """Sendet Text an den Übersetzungsdienst.
-
-    Wenn der Quelltext nicht mit einem Satzzeichen endet,
-    wird vor der Übersetzung ein Punkt angehängt.
-    """
+def translate_text(text, source_lang, target_lang, url=TRANSLATION_URL):
+    """Sendet Text an den Übersetzungsdienst."""
     if not text.strip():
         return ""
 
     text = text.rstrip()
 
-    # Punkt ergänzen, wenn kein Satzzeichen am Ende steht.
-    #if not re.search(r'[.!?…]["\'»”)\]]*$', text):
-    #    text += "."
+    # Falls gewünscht, hier einen Punkt ergänzen:
+    if not re.search(r'[.!?…]["\'»”)\]]*$', text):
+        text += "."
 
     payload = {
         "text": text,
         "source_language": source_lang,
-        "target_language": target_lang
+        "target_language": target_lang,
     }
 
     response = requests.post(
         url,
         json=payload,
         headers={"Content-Type": "application/json"},
-        timeout=120
+        timeout=120,
     )
-
     response.raise_for_status()
 
     return response.json().get("translation", text)
 
 
 # ------------------------------------------------------------
-# Stabilitätserkennung
+# Allgemeine Hilfsfunktionen
 # ------------------------------------------------------------
 
 def common_prefix(strings):
     """Ermittelt den längsten gemeinsamen Zeichenanfang."""
-
     if not strings:
         return ""
 
@@ -112,10 +91,7 @@ def common_prefix(strings):
         limit = min(len(prefix), len(text))
         index = 0
 
-        while (
-            index < limit
-            and prefix[index] == text[index]
-        ):
+        while index < limit and prefix[index] == text[index]:
             index += 1
 
         prefix = prefix[:index]
@@ -126,128 +102,136 @@ def common_prefix(strings):
     return prefix
 
 
-def find_stable_prefix(translations):
-    """
-    Erkennt einen stabilen Anfang der deutschen Übersetzung.
+def has_sentence_ending(text):
+    """Prüft, ob Text mit einem Satzzeichen endet."""
+    return bool(re.search(r'[.!?…]["\'»”)\]]*$', text.rstrip()))
 
-    Es werden die letzten STABILITY_WINDOW Übersetzungen
-    miteinander verglichen.
-    """
 
+def sentence_prefixes(text):
+    """Liefert vollständige Satzpräfixe aus einem Text."""
+    prefixes = []
+    pattern = re.compile(r'[.!?…]["\'»”)\]]*(?=\s|$)')
+
+    for match in pattern.finditer(text):
+        candidate = text[:match.end()].strip()
+        if candidate:
+            prefixes.append(candidate)
+
+    return prefixes
+
+
+# ------------------------------------------------------------
+# Stabilitätserkennung
+# ------------------------------------------------------------
+
+def find_stable_prefix(translations, line_boundary_history=None):
+    """
+    Erkennt einen stabilen deutschen Anfang.
+
+    Zuerst wird der gemeinsame Präfix der letzten Übersetzungen
+    betrachtet. Vollständige Sätze werden bevorzugt.
+
+    Zusätzlich werden Übersetzungen betrachtet, die beim Erreichen
+    einer ursprünglichen HSB-Zeilengrenze entstanden sind. Ein dort
+    erkannter Satz wird nur verwendet, wenn er in allen aktuellen
+    Übersetzungen unverändert am Anfang vorkommt.
+    """
     if len(translations) < STABILITY_WINDOW:
         return ""
 
     recent = translations[-STABILITY_WINDOW:]
     prefix = common_prefix(recent)
 
-    if len(prefix) < MIN_STABLE_LENGTH:
-        return ""
+    if len(prefix.strip()) >= MIN_STABLE_LENGTH:
+        # Vollständigen Satz im gemeinsamen Präfix bevorzugen.
+        candidates = sentence_prefixes(prefix)
+        if candidates:
+            return candidates[-1]
 
-    # Bevorzugt vollständige Sätze.
-    sentence_endings = [
-        prefix.rfind("."),
-        prefix.rfind("!"),
-        prefix.rfind("?")
-    ]
+    # Zeilenrand-basierter Rückfall:
+    # Ein früherer Übersetzungssnapshot an einer HSB-Zeilengrenze
+    # kann einen vollständigen Satz enthalten, der in den neueren
+    # Übersetzungen weiterhin unverändert am Anfang steht.
+    if line_boundary_history:
+        recent_texts = translations[-STABILITY_WINDOW:]
 
-    last_sentence_end = max(sentence_endings)
+        for item in reversed(line_boundary_history):
+            snapshot = item["translation"]
 
-    if last_sentence_end >= MIN_STABLE_LENGTH - 1:
-        return prefix[:last_sentence_end + 1].strip()
+            for candidate in reversed(sentence_prefixes(snapshot)):
+                if len(candidate) < MIN_STABLE_LENGTH:
+                    continue
 
-    # Andernfalls an einer Wortgrenze abschneiden.
-    last_space = prefix.rfind(" ")
+                if all(text.startswith(candidate) for text in recent_texts):
+                    return candidate
 
-    if last_space >= MIN_STABLE_LENGTH:
-        return prefix[:last_space].strip()
+    # Falls kein vollständiger Satz erkennbar ist, auf eine
+    # vollständige Wortgrenze des gemeinsamen Präfixes zurückfallen.
+    if len(prefix.strip()) >= MIN_STABLE_LENGTH:
+        last_space = prefix.rfind(" ")
+        if last_space >= MIN_STABLE_LENGTH:
+            return prefix[:last_space].strip()
 
     return ""
 
-def force_stable_prefix(translations):
+
+def force_stable_prefix(translations, line_boundary_history=None):
     """
-    Erzwingt die Festlegung eines deutschen Textsegments,
-    wenn die normale Stabilitätserkennung nicht erfolgreich ist.
-
-    Strategie:
-    1. Längsten gemeinsamen Präfix der Historie bestimmen.
-    2. Wenn möglich, an einer Satzgrenze abschneiden.
-    3. Andernfalls den Anfang der letzten Übersetzung
-       bis zu einer Wortgrenze verwenden.
-
-    Rückgabe:
-        Ein nichtleerer deutscher Textanfang oder "".
+    Erzwingt ein deutsches Segment, wenn keine reguläre Stabilität
+    erkannt wurde. Satzgrenzen aus früheren Übersetzungen werden
+    bevorzugt, sofern sie noch am Anfang der aktuellen Übersetzung
+    stehen.
     """
-
     if not translations:
         return ""
 
-    # Zunächst den gemeinsamen Präfix der gesamten Historie
-    # bestimmen. Das kann auch bei abweichenden Übersetzungen
-    # einen brauchbaren gemeinsamen Anfang ergeben.
-    prefix = common_prefix(translations)
+    recent = translations[-STABILITY_WINDOW:]
+    prefix = common_prefix(recent)
+
+    candidates = sentence_prefixes(prefix)
+    if candidates:
+        return candidates[-1]
+
+    # Zeilengrenzen-Historie nutzen, sofern ein Satz aus einem
+    # früheren Snapshot noch am Anfang der aktuellen Texte steht.
+    if line_boundary_history:
+        for item in reversed(line_boundary_history):
+            snapshot = item["translation"]
+
+            for candidate in reversed(sentence_prefixes(snapshot)):
+                if all(text.startswith(candidate) for text in recent):
+                    return candidate
 
     if prefix.strip():
-        # Satzgrenze bevorzugen.
-        sentence_endings = [
-            prefix.rfind("."),
-            prefix.rfind("!"),
-            prefix.rfind("?")
-        ]
-
-        last_sentence_end = max(sentence_endings)
-
-        if last_sentence_end >= 0:
-            candidate = prefix[:last_sentence_end + 1].strip()
-
-            if candidate:
-                return candidate
-
-        # Sonst an der letzten vollständigen Wortgrenze.
         last_space = prefix.rfind(" ")
-
         if last_space > 0:
-            candidate = prefix[:last_space].strip()
+            return prefix[:last_space].strip()
 
-            if candidate:
-                return candidate
-
-    # Kein brauchbarer gemeinsamer Präfix:
-    # Anfang der aktuellsten Übersetzung verwenden.
     latest = translations[-1].strip()
-
     if not latest:
         return ""
 
-    # Möglichst einen vollständigen Satz verwenden.
-    sentence_match = re.search(r"^.*?[.!?](?:\s|$)", latest)
+    latest_sentences = sentence_prefixes(latest)
+    if latest_sentences:
+        return latest_sentences[0]
 
-    if sentence_match:
-        return sentence_match.group().strip()
-
-    # Sonst den ersten Teil bis zur nächsten Wortgrenze.
     limit = min(LINELEN_FUZZY_MATCH, len(latest))
+    candidate = latest[:limit]
 
     if limit < len(latest):
-        boundary = latest.rfind(" ", 0, limit)
-
+        boundary = candidate.rfind(" ")
         if boundary > 0:
-            return latest[:boundary].strip()
+            candidate = candidate[:boundary]
 
-    # Letzter Rückfall: gesamte bisherige Übersetzung.
-    return latest
+    return candidate.strip() or latest
+
 
 # ------------------------------------------------------------
 # Unscharfe Suche im Originalpuffer
 # ------------------------------------------------------------
 
 def tokenize_with_positions(text):
-    """
-    Zerlegt Text in Wörter und speichert deren Zeichenpositionen.
-
-    Die Positionen beziehen sich auf den Originaltext.
-    Satzzeichen bleiben dadurch im Originalpuffer erhalten.
-    """
-
+    """Zerlegt Text in Wörter und speichert Zeichenpositionen."""
     return [
         (match.group(), match.start(), match.end())
         for match in re.finditer(r"\w+", text, flags=re.UNICODE)
@@ -256,184 +240,208 @@ def tokenize_with_positions(text):
 
 def normalize_word(word):
     """Normalisiert ein Wort für den Vergleich."""
-
     return word.casefold()
 
 
-def find_fuzzy_prefix(original, backtranslated):
+def score_prefix(translated_words, original_words):
+    """Vergleicht Rückübersetzung mit einem Originalwortpräfix."""
+    return difflib.SequenceMatcher(
+        None,
+        translated_words,
+        original_words,
+        autojunk=False,
+    ).ratio()
+
+
+def find_fuzzy_prefix(original, backtranslated, line_boundaries=None):
     """
-    Sucht einen möglichst passenden Anfang im Originalpuffer.
+    Sucht den passenden Anfang des Originalpuffers.
 
-    Verglichen wird die Rückübersetzung des stabilen deutschen
-    Abschnitts mit verschiedenen Wortpräfixen des Originals.
-
-    Rückgabe:
-        (entfernter_text, resttext, ähnlichkeit)
-
-    Wenn kein zuverlässiger Treffer gefunden wird:
-        ("", original, bester_score)
-
-    Es wird ausschließlich ein Präfix des Originalpuffers
-    entfernt. Text aus der Mitte oder vom Ende wird niemals
-    herausgeschnitten.
+    Zeilengrenzen werden als zusätzliche Kandidaten berücksichtigt.
+    Wenn ein Zeilengrenzen-Kandidat nahezu so gut passt wie der beste
+    Treffer, wird die Zeilengrenze bevorzugt. Bei geringer Ähnlichkeit
+    wird weiterhin ein Abschneiden erzwungen; wenn möglich an einer
+    gespeicherten Zeilengrenze.
     """
+    if line_boundaries is None:
+        line_boundaries = []
 
     original_tokens = tokenize_with_positions(original)
     translated_tokens = tokenize_with_positions(backtranslated)
 
-    original_words = [
-        normalize_word(token[0])
-        for token in original_tokens
-    ]
-
-    translated_words = [
-        normalize_word(token[0])
-        for token in translated_tokens
-    ]
-
-    #print_section(
-    #    "Vergleich: Rückübersetzung (hsb)",
-    #    backtranslated
-    #)
+    original_words = [normalize_word(token[0]) for token in original_tokens]
+    translated_words = [normalize_word(token[0]) for token in translated_tokens]
 
     print("Wörter der Rückübersetzung:")
     print(translated_words)
-
     print("\nWörter im Originalpuffer:")
     print(original_words)
 
-    # Ohne genügend Vergleichswörter ist eine zuverlässige
-    # unscharfe Suche schwierig.
-    if len(translated_words) < MIN_MATCH_WORDS:
-        print(
-            "\nZu wenige Wörter in der Rückübersetzung. "
-            "Der Originalpuffer bleibt unverändert."
-        )
+    if not original_tokens:
+        return "", original, 0.0, None
 
-        return "", original, 0.0
+    if not translated_words:
+        # Ohne Rückübersetzungswörter kann kein sinnvoller Vergleich
+        # stattfinden. Eine Zeilengrenze ist hier der sicherste
+        # verfügbare Kandidat; sonst bleibt mindestens ein Wort.
+        usable = [
+            b for b in line_boundaries
+            if 0 < b["position"] <= len(original)
+        ]
+        if usable:
+            boundary = usable[0]
+            cut_position = boundary["position"]
+            removed = original[:cut_position]
+            remaining = original[cut_position:].lstrip()
+            return removed, remaining, 0.0, boundary
 
-    if len(original_words) < MIN_MATCH_WORDS:
-        print(
-            "\nZu wenige Wörter im Originalpuffer. "
-            "Der Originalpuffer bleibt unverändert."
-        )
-
-        return "", original, 0.0
+        cut_position = original_tokens[0][2]
+        return original[:cut_position], original[cut_position:].lstrip(), 0.0, None
 
     target_length = len(translated_words)
+    min_length = max(1, min(MIN_MATCH_WORDS, int(target_length * 0.5)))
+    max_length = min(len(original_words), int(target_length * 1.8) + 3)
 
-    # Die gesuchte Originalspanne kann kürzer oder länger
-    # als die Rückübersetzung sein.
-    min_length = max(
-        MIN_MATCH_WORDS,
-        int(target_length * 0.5)
-    )
+    # Kandidaten aus der normalen Wortpräfixsuche.
+    candidate_lengths = set(range(min_length, max_length + 1))
 
-    max_length = min(
-        len(original_words),
-        int(target_length * 1.8) + 3
-    )
+    # Auch Zeilengrenzen als Kandidaten zulassen, selbst wenn deren
+    # Wortanzahl außerhalb des üblichen Suchbereichs liegt.
+    boundary_by_length = {}
+    for boundary in line_boundaries:
+        position = boundary["position"]
+        if position <= 0 or position > len(original):
+            continue
 
-    best_score = 0.0
-    best_length = 0
+        word_count = sum(1 for token in original_tokens if token[2] <= position)
+        if word_count > 0:
+            candidate_lengths.add(word_count)
+            boundary_by_length.setdefault(word_count, []).append(boundary)
 
+    scores = {}
     print("\nKandidaten für den Originalpräfix:")
 
-    for candidate_length in range(
-        min_length,
-        max_length + 1
-    ):
+    for candidate_length in sorted(candidate_lengths):
+        if candidate_length > len(original_words):
+            continue
 
-        candidate_words = original_words[:candidate_length]
-
-        # Zeichenfolge auf Wortebene vergleichen.
-        matcher = difflib.SequenceMatcher(
-            None,
+        score = score_prefix(
             translated_words,
-            candidate_words,
-            autojunk=False
+            original_words[:candidate_length],
         )
+        scores[candidate_length] = score
 
-        similarity = matcher.ratio()
-
+        suffix = " (Zeilengrenze)" if candidate_length in boundary_by_length else ""
         print(
             f"  {candidate_length:3d} Wörter: "
-            f"Ähnlichkeit = {similarity:.3f}"
+            f"Ähnlichkeit = {score:.3f}{suffix}"
         )
 
-        if similarity > best_score:
-            best_score = similarity
-            best_length = candidate_length
+    if not scores:
+        return "", original, 0.0, None
 
-    print(f"\nBeste Ähnlichkeit: {best_score:.3f} - {best_length} Wörter")
-    # print(f"Erforderliche Ähnlichkeit: {MIN_MATCH_RATIO:.3f}")
+    best_length = max(scores, key=scores.get)
+    best_score = scores[best_length]
 
-    if (
-        best_length == 0
-        or best_score < MIN_MATCH_RATIO
-    ):
-        #print(
-        #    "\nKein ausreichend zuverlässiger Treffer."
-        #    "\nDas Abschneiden wird erzwungen."
-        #)
+    # Einen fast gleich guten Zeilengrenzen-Kandidaten bevorzugen.
+    boundary_options = []
+    for length, boundaries in boundary_by_length.items():
+        if length not in scores:
+            continue
+        if scores[length] >= best_score - BOUNDARY_SCORE_TOLERANCE:
+            for boundary in boundaries:
+                boundary_options.append((scores[length], boundary, length))
 
-        # Anzahl der Wörter aus der Rückübersetzung als
-        # Schätzwert für die Länge des zu entfernenden
-        # Originalpräfixes verwenden.
-        #
-        # Bei zu wenigen Wörtern trotzdem mindestens ein
-        # Originalwort entfernen, sofern vorhanden.
-        estimated_length = max(
-            1,
-            len(translated_words)
+    selected_boundary = None
+
+    if boundary_options:
+        # Zuerst nach Ähnlichkeit sortieren, dann vollständige
+        # Satzzeichen am Zeilenende bevorzugen.
+        boundary_options.sort(
+            key=lambda item: (
+                item[0],
+                bool(item[1].get("ends_sentence", False)),
+                item[1]["position"],
+            ),
+            reverse=True,
         )
+        boundary_score, selected_boundary, boundary_length = boundary_options[0]
+        best_length = boundary_length
+        best_score = boundary_score
 
-        # Niemals mehr Wörter entfernen, als vorhanden sind.
-        best_length = min(
-            estimated_length,
-            len(original_tokens)
+    print(
+        f"\nAusgewählter Kandidat: {best_length} Wörter, "
+        f"Ähnlichkeit = {best_score:.3f}"
+    )
+
+    if selected_boundary is not None:
+        cut_position = selected_boundary["position"]
+        print(
+            "Kürzungsposition anhand ursprünglicher Zeilengrenze: "
+            f"Zeile {selected_boundary['line_number']}"
         )
-
-        if best_length == 0:
-            return "", original, best_score
-
-        # Zeichenposition des letzten zu entfernenden Wortes.
+    else:
+        # Wortende verwenden und unmittelbar folgende Satzzeichen
+        # mitnehmen, damit z. B. ein Punkt nicht im Restpuffer bleibt.
         cut_position = original_tokens[best_length - 1][2]
+        while cut_position < len(original) and not original[cut_position].isspace():
+            cut_position += 1
 
-        removed_text = original[:cut_position]
-        remaining_text = original[cut_position:].lstrip()
-
-        print_section(
-            "ERZWUNGENES Abschneiden: ",
-            f"{removed_text} | {remaining_text} - " 
-            f"{best_score:.3f} < {MIN_MATCH_RATIO:.3f}."
+    # Bei geringer Ähnlichkeit weiterhin das Abschneiden erzwingen.
+    if best_score < MIN_MATCH_RATIO:
+        print(
+            "\nWARNUNG: Die Ähnlichkeit liegt unter dem Grenzwert. "
+            "Das Abschneiden wird trotzdem erzwungen."
         )
 
-        #print_section(
-        #    "ERZWUNGENES Abschneiden: Verbleibender Text",
-        #    remaining_text
-        #)
+        # Wenn kein brauchbarer Zeilengrenzen-Kandidat gewählt wurde,
+        # nach Möglichkeit die Grenze suchen, die der geschätzten
+        # Wortanzahl am nächsten liegt.
+        if selected_boundary is None and boundary_by_length:
+            estimated_length = min(
+                max(1, len(translated_words)),
+                len(original_tokens),
+            )
+            possible = []
+            for length, boundaries in boundary_by_length.items():
+                if length in scores:
+                    for boundary in boundaries:
+                        possible.append((
+                            abs(length - estimated_length),
+                            -scores[length],
+                            not boundary.get("ends_sentence", False),
+                            boundary["position"],
+                            boundary,
+                            scores[length],
+                        ))
 
-        #print(
-        #    f"Warnung: Unscharfe Übereinstimmung "
-        #    f"{best_score:.3f} liegt unter dem Grenzwert "
-        #    f"{MIN_MATCH_RATIO:.3f}."
-        #)
+            if possible:
+                possible.sort(key=lambda item: item[:4])
+                _, _, _, _, selected_boundary, boundary_score = possible[0]
+                cut_position = selected_boundary["position"]
+                best_score = boundary_score
+                print(
+                    "Erzwungene Kürzung an gespeicherter Zeilengrenze: "
+                    f"Zeile {selected_boundary['line_number']}"
+                )
+        elif selected_boundary is None:
+            estimated_length = min(
+                max(1, len(translated_words)),
+                len(original_tokens),
+            )
+            cut_position = original_tokens[estimated_length - 1][2]
+            while cut_position < len(original) and not original[cut_position].isspace():
+                cut_position += 1
 
-        return removed_text, remaining_text, best_score
-    
-    # Ende des letzten erkannten Wortes im Originaltext.
-    cut_position = original_tokens[best_length - 1][2]
-
-    removed_text = original[:cut_position]
+    removed_text = original[:cut_position].rstrip()
     remaining_text = original[cut_position:].lstrip()
 
     print_section(
-        "Gefundener Originalpräfix",
-        f"{removed_text} | {remaining_text}" 
+        "Gewählter Originalpräfix / verbleibender Text",
+        f"{removed_text} | {remaining_text}\nÄhnlichkeit: {best_score:.3f}",
     )
 
-    return removed_text, remaining_text, best_score
+    return removed_text, remaining_text, best_score, selected_boundary
 
 
 # ------------------------------------------------------------
@@ -447,32 +455,77 @@ def print_section(title, text):
 
 
 # ------------------------------------------------------------
+# Zeilengrenzen verwalten
+# ------------------------------------------------------------
+
+def append_source_line(buffer_hsb, line, line_boundaries, line_number):
+    """
+    Fügt eine Eingabezeile an den Puffer an und speichert ihre
+    ursprüngliche Endposition im zusammengefügten Puffer.
+    """
+    line = line.strip()
+    if not line:
+        return buffer_hsb
+
+    if buffer_hsb:
+        buffer_hsb = buffer_hsb.rstrip() + " " + line
+    else:
+        buffer_hsb = line
+
+    line_boundaries.append({
+        "position": len(buffer_hsb),
+        "line_number": line_number,
+        "ends_sentence": has_sentence_ending(line),
+    })
+
+    return buffer_hsb
+
+
+def shift_line_boundaries(line_boundaries, cut_position):
+    """
+    Entfernt Zeilengrenzen aus dem bereits abgeschnittenen Bereich
+    und verschiebt verbleibende Positionen relativ zum neuen Puffer.
+    """
+    shifted = []
+
+    for boundary in line_boundaries:
+        position = boundary["position"]
+
+        # Die Grenze am Ende des entfernten Präfixes ist verbraucht.
+        if position <= cut_position:
+            continue
+
+        shifted_boundary = dict(boundary)
+        shifted_boundary["position"] = position - cut_position
+        shifted.append(shifted_boundary)
+
+    return shifted
+
+
+# ------------------------------------------------------------
 # Hauptverarbeitung
 # ------------------------------------------------------------
 
 def process_file(input_file, output_file):
-
     input_path = Path(input_file)
     output_path = Path(output_file)
 
     if not input_path.is_file():
-        raise FileNotFoundError(
-            f"Eingabedatei nicht gefunden: {input_path}"
-        )
+        raise FileNotFoundError(f"Eingabedatei nicht gefunden: {input_path}")
 
-    lines = input_path.read_text(
-        encoding="utf-8"
-    ).splitlines()
+    # splitlines() erhält die einzelnen Zeilen als getrennte Segmente.
+    lines = input_path.read_text(encoding="utf-8").splitlines()
 
-    # Originalpuffer in Obersorbisch.
     buffer_hsb = ""
+    line_boundaries = []
 
-    # Übersetzungen seit dem letzten erfolgreichen Commit.
+    # Jede Übersetzung entspricht einem Stand des Puffers nach einer
+    # Eingabezeile. Die zweite Historie hält die zugehörigen Snapshots
+    # an den ursprünglichen Zeilengrenzen fest.
     translation_history = []
+    line_boundary_history = []
 
-    # Protokoll.
     output_lines = []
-
     segment_count = 0
     commit_count = 0
 
@@ -484,83 +537,65 @@ def process_file(input_file, output_file):
         f"Sprachen: {SOURCE_LANG} -> {TARGET_LANG}\n"
         f"Stabilitätsfenster: {STABILITY_WINDOW}\n"
         f"Mindestlänge stabiler Text: {MIN_STABLE_LENGTH}\n"
-        f"Mindestähnlichkeit: {MIN_MATCH_RATIO}"
+        f"Mindestähnlichkeit: {MIN_MATCH_RATIO}",
     )
 
     for line_number, line in enumerate(lines, start=1):
-
         if STEPS:
             input("Enter drücken für die nächste Zeile ...")
 
         if not line.strip():
-            print(
-                f"\nZeile {line_number}: leer, übersprungen."
-            )
+            print(f"\nZeile {line_number}: leer, übersprungen.")
             continue
 
         segment_count += 1
 
         print()
         print("#" * 72)
-        print(f"SEGMENT {segment_count}")
+        print(f"SEGMENT {segment_count} (Quelldatei-Zeile {line_number})")
         print("#" * 72)
 
-        # ----------------------------------------------------
-        # 1. Originaltext akkumulieren
-        # ----------------------------------------------------
-
-        if buffer_hsb:
-            buffer_hsb = (
-                buffer_hsb.rstrip()
-                + " "
-                + line.strip()
-            )
-        else:
-            buffer_hsb = line.strip()
-
-        print_section(
-            "HSB:",
-            buffer_hsb
+        # 1. Originalzeile anhängen und ihre Endposition speichern.
+        buffer_hsb = append_source_line(
+            buffer_hsb,
+            line,
+            line_boundaries,
+            line_number,
         )
 
-        # ----------------------------------------------------
-        # 2. Gesamten Originalpuffer übersetzen
-        # ----------------------------------------------------
+        print_section("HSB-Puffer:", buffer_hsb)
+        print("Gespeicherte Zeilengrenzen:")
+        print([
+            {
+                "position": item["position"],
+                "line_number": item["line_number"],
+                "ends_sentence": item["ends_sentence"],
+            }
+            for item in line_boundaries
+        ])
 
+        # 2. Gesamten Originalpuffer übersetzen.
         translation_de = translate_text(
             buffer_hsb,
             SOURCE_LANG,
-            TARGET_LANG
+            TARGET_LANG,
         )
+        print_section("HSB2DE:", translation_de)
 
-        print_section(
-            "HSB2DE:",
-            translation_de
-        )
-
-        # ----------------------------------------------------
-        # 3. Übersetzung speichern
-        # ----------------------------------------------------
-
+        # 3. Übersetzungshistorie speichern.
         translation_history.append(translation_de)
+        line_boundary_history.append({
+            "line_number": line_number,
+            "source_boundary": len(buffer_hsb),
+            "translation": translation_de,
+        })
 
-        # stored_translation_de = translation_de
-
-        #print_section(
-        #    "3. Gespeicherter String (de)",
-        #    stored_translation_de
-        #)
-
-        # ----------------------------------------------------
-        # 4. Stabilen deutschen Textanfang suchen
-        # ----------------------------------------------------
-
+        # 4. Stabilen deutschen Textanfang suchen.
         stable_prefix_de = find_stable_prefix(
-            translation_history
+            translation_history,
+            line_boundary_history,
         )
 
-        # Prüfen, ob die normale Stabilitätserkennung gescheitert ist
-        # und der Originalpuffer die konfigurierte Schwelle erreicht hat.
         forced_stability = False
 
         if (
@@ -568,184 +603,110 @@ def process_file(input_file, output_file):
             and len(buffer_hsb) >= LINELEN_FUZZY_MATCH
         ):
             stable_prefix_de = force_stable_prefix(
-                translation_history
+                translation_history,
+                line_boundary_history,
             )
-
-            if stable_prefix_de:
-                forced_stability = True
-
-                #print_section(
-                #    "DE-forced-stable:",
-                #    stable_prefix_de
-                #)
+            forced_stability = bool(stable_prefix_de)
 
         if not stable_prefix_de:
-
-            print_section(
-                "DE-NO STABLE PREFIX:",
-                "NONE"
-            )
-
+            print_section("DE-NO STABLE PREFIX:", "NONE")
             if REQUEST_DELAY:
                 time.sleep(REQUEST_DELAY)
-
             continue
-
-        #if forced_stability:
-        #    print(
-        #        "WARNUNG: Das deutsche Segment wurde "
-        #        "mangels ausreichender Stabilität erzwungen."
-        #    )
 
         print_section(
             "DE-final:",
-            f"{stable_prefix_de} - forced={forced_stability}"
+            f"{stable_prefix_de} - forced={forced_stability}",
         )
 
-        # ----------------------------------------------------
-        # 5. Stabilen deutschen Teil rückübersetzen
-        # ----------------------------------------------------
-
+        # 5. Den stabilen deutschen Teil zurückübersetzen.
         stable_prefix_hsb = translate_text(
             stable_prefix_de,
             TARGET_LANG,
-            SOURCE_LANG
+            SOURCE_LANG,
         )
+        print_section("DE-final2HSB:", stable_prefix_hsb)
 
-        print_section(
-            "DE-final2HSB:",
-            stable_prefix_hsb
-        )
-
-        # ----------------------------------------------------
-        # 6. Rückübersetzung unscharf im Original suchen
-        # ----------------------------------------------------
-
-        removed_text, remaining_text, similarity = (
+        # 6. Rückübersetzung im Originalpuffer suchen; gespeicherte
+        # Zeilengrenzen werden als zusätzliche Kandidaten verwendet.
+        removed_text, remaining_text, similarity, selected_boundary = (
             find_fuzzy_prefix(
                 buffer_hsb,
-                stable_prefix_hsb
+                stable_prefix_hsb,
+                line_boundaries,
             )
         )
 
-        # ----------------------------------------------------
-        # 7. Originalpuffer reduzieren
-        # ----------------------------------------------------
-
         print_section(
             "HSB-reduce",
-            f"({removed_text or '[nichts entfernt]'}) | {remaining_text}"
+            f"({removed_text or '[nichts entfernt]'}) | {remaining_text}",
         )
 
-        # Ohne erfolgreichen Treffer bleibt der Puffer
-        # erhalten und es wird kein Commit ausgeführt.
+        # Ohne entfernten Text keinen Commit durchführen.
         if not removed_text:
-
-            #print(
-            #    "\nKein Commit: Der Originalpuffer wurde "
-            #    "nicht verändert. Die Suche wird bei "
-            #    "späteren Segmenten erneut versucht."
-            #)
-
-            #output_lines.append(
-            #    f"[Segment {segment_count}]\n"
-            #    f"Original hsb: {buffer_hsb}\n"
-            #    f"Übersetzung de: {translation_de}\n"
-            #    f"Stabiler Teil de: {stable_prefix_de}\n"
-            #    f"Rückübersetzung hsb: {stable_prefix_hsb}\n"
-            #    f"Ähnlichkeit: {similarity:.3f}\n"
-            #    f"Status: Kein zuverlässiger Treffer\n"
-            #)
-
             if REQUEST_DELAY:
                 time.sleep(REQUEST_DELAY)
-
             continue
 
-        # Erst bei erfolgreicher Zuordnung wird der Puffer
-        # tatsächlich gekürzt.
+        # 7. Puffer und Zeilengrenzen gemeinsam aktualisieren.
         old_buffer_hsb = buffer_hsb
+        cut_position = len(removed_text)
         buffer_hsb = remaining_text
+        line_boundaries = shift_line_boundaries(
+            line_boundaries,
+            cut_position,
+        )
 
         commit_count += 1
 
-        print_section(
-            "HSB-new:",
-            buffer_hsb
-        )
+        print_section("HSB-new:", buffer_hsb)
+        print("Verbleibende Zeilengrenzen:")
+        print([
+            {
+                "position": item["position"],
+                "line_number": item["line_number"],
+                "ends_sentence": item["ends_sentence"],
+            }
+            for item in line_boundaries
+        ])
 
-        # Stabilen deutschen Abschnitt dauerhaft protokollieren.
-        #output_lines.append(
-        #    f"[Commit {commit_count}]\n"
-        #    f"Stabiler Text de: {stable_prefix_de}\n"
-        #    f"Rückübersetzung hsb: {stable_prefix_hsb}\n"
-        #    f"Entfernter Originaltext hsb: {removed_text}\n"
-        #    f"Ähnlichkeit: {similarity:.3f}\n"
-        #    f"Originalpuffer vorher: {old_buffer_hsb}\n"
-        #    f"Originalpuffer nachher: {buffer_hsb}\n"
-        #)
-        output_lines.append(f"{stable_prefix_de}")
+        output_lines.append(stable_prefix_de.strip())
 
-        # Die Historie wird nach erfolgreicher Kürzung
-        # zurückgesetzt, da nun ein neuer Textanfang vorliegt.
+        # Nach dem Commit beziehen sich die Übersetzungen auf einen
+        # neuen Pufferanfang; deshalb die Historien zurücksetzen.
         translation_history.clear()
-
-        #print_section(
-        #    "9. Status nach erfolgreichem Commit",
-        #    f"Commit: {commit_count}\n"
-        #    f"Verbleibender Originalpuffer: {buffer_hsb}\n"
-        #    f"Übersetzungshistorie zurückgesetzt."
-        #)
+        line_boundary_history.clear()
 
         if REQUEST_DELAY:
             time.sleep(REQUEST_DELAY)
 
-    # --------------------------------------------------------
-    # Abschluss
-    # --------------------------------------------------------
-
-    print_section(
-        "ABSCHLUSS: Verbleibender Originalpuffer (hsb)",
-        buffer_hsb
-    )
+    # Abschluss: verbleibenden Originalpuffer übersetzen.
+    print_section("ABSCHLUSS: Verbleibender HSB-Puffer", buffer_hsb)
 
     if buffer_hsb.strip():
-
         final_translation_de = translate_text(
             buffer_hsb,
             SOURCE_LANG,
-            TARGET_LANG
+            TARGET_LANG,
         )
-
         print_section(
             "ABSCHLUSS: Übersetzung des verbleibenden Textes",
-            final_translation_de
+            final_translation_de,
         )
+        if final_translation_de.strip():
+            output_lines.append(final_translation_de.strip())
 
-        #output_lines.append(
-        #    "[Abschluss]\n"
-        #    f"Verbleibender Originaltext hsb: {buffer_hsb}\n"
-        #    f"Übersetzung de: {final_translation_de}\n"
-        #)
-        output_lines.append(f"{final_translation_de}")
-
-
-    #else:
-        #output_lines.append(
-        #    "[Abschluss]\n"
-        #    "Kein verbleibender Originaltext.\n"
-        #)
-
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        "\n".join(output_lines),
-        encoding="utf-8"
+        "\n".join(output_lines) + ("\n" if output_lines else ""),
+        encoding="utf-8",
     )
 
     print_section(
         "FERTIG",
         f"Verarbeitete Segmente: {segment_count}\n"
         f"Erfolgreiche Commits: {commit_count}\n"
-        f"Ergebnisdatei: {output_path}"
+        f"Ergebnisdatei: {output_path}",
     )
 
 
@@ -754,43 +715,40 @@ def process_file(input_file, output_file):
 # ------------------------------------------------------------
 
 def main():
-
     parser = argparse.ArgumentParser(
         description=(
-            "Inkrementelle Übersetzung von Obersorbisch "
-            "nach Deutsch mit unscharfer Entfernung "
-            "stabiler Textanfänge."
+            "Inkrementelle Übersetzung von Obersorbisch nach Deutsch "
+            "mit stabiler Segmentierung und gespeicherten Zeilengrenzen."
         )
     )
 
     parser.add_argument(
         "input",
-        help="Eingabedatei mit einem Segment pro Zeile"
+        help="Eingabedatei mit einem Segment pro Zeile",
     )
-
     parser.add_argument(
         "-o",
         "--output",
         default="uebersetzungsprotokoll.txt",
-        help="Ausgabedatei für das Protokoll"
+        help="Ausgabedatei für die deutsche Übersetzung",
+    )
+    parser.add_argument(
+        "--steps",
+        action="store_true",
+        help="Vor jeder Eingabezeile auf Enter warten",
     )
 
     args = parser.parse_args()
 
-    try:
-        process_file(
-            args.input,
-            args.output
-        )
+    global STEPS
+    STEPS = args.steps
 
+    try:
+        process_file(args.input, args.output)
     except (OSError, requests.RequestException) as exc:
-        print(
-            f"\nFEHLER: {exc}",
-            file=sys.stderr
-        )
+        print(f"\nFEHLER: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-    
