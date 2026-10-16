@@ -5,22 +5,23 @@
 Inkrementelle Übersetzung von Obersorbisch nach Deutsch.
 
 Ablauf:
-1. Textsegmente aus einer Datei zeilenweise einlesen.
-2. Segmente im obersorbischen Eingabepuffer akkumulieren.
-3. Den gesamten Puffer nach Deutsch übersetzen.
-4. Die Übersetzungen der letzten Durchläufe vergleichen.
-5. Einen stabilen Anfang der deutschen Übersetzung erkennen.
-6. Den stabilen Anfang zur Kontrolle nach Obersorbisch zurückübersetzen.
-7. Den verbleibenden deutschen Text nach Obersorbisch übersetzen.
-8. Den zurückübersetzten Rest als neuen Eingabepuffer verwenden.
+1. Segmente aus einer Textdatei zeilenweise einlesen.
+2. Im Originalpuffer (hsb) akkumulieren.
+3. Gesamten Puffer nach Deutsch übersetzen.
+4. Stabilen Anfang der deutschen Übersetzung erkennen.
+5. Stabilen deutschen Teil nach Obersorbisch zurückübersetzen.
+6. Rückübersetzung unscharf mit dem Originalpuffer vergleichen.
+7. Den passenden Anfang aus dem Originalpuffer entfernen.
+8. Mit dem verbleibenden Originalpuffer fortfahren.
 
-Sprachcodes:
-    Obersorbisch: hsb
-    Deutsch:      de
+Wichtig:
+Der Originalpuffer wird NICHT durch eine Rückübersetzung
+des verbleibenden deutschen Textes ersetzt.
 """
 
 import argparse
 import difflib
+import re
 import sys
 import time
 from pathlib import Path
@@ -37,16 +38,19 @@ TARGET_LANG = "de"
 
 TRANSLATION_URL = "http://localhost:3000/translate"
 
-# Anzahl aufeinanderfolgender Übersetzungen, die verglichen werden.
 STABILITY_WINDOW = 3
+MIN_STABLE_LENGTH = 20
 
-# Mindestlänge eines stabilen Textanfangs.
-MIN_STABLE_LENGTH = 40
+# Mindestähnlichkeit für die unscharfe Suche.
+# Wertebereich: 0.0 bis 1.0
+MIN_MATCH_RATIO = 0.40
 
-# Kurze Wartezeit zwischen den Anfragen (Sekunden).
-# Bei Bedarf auf 0 setzen.
+# Mindestanzahl Wörter für einen zuverlässigen Vergleich.
+MIN_MATCH_WORDS = 4
+
 REQUEST_DELAY = 0.0
 
+STEPS=False
 
 # ------------------------------------------------------------
 # Übersetzungsdienst
@@ -58,10 +62,7 @@ def translate_text(
     target_lang,
     url=TRANSLATION_URL
 ):
-    """
-    Sendet Text an den Übersetzungsdienst und gibt die
-    Übersetzung zurück.
-    """
+    """Sendet Text an den Übersetzungsdienst."""
 
     payload = {
         "text": text,
@@ -69,14 +70,10 @@ def translate_text(
         "target_language": target_lang
     }
 
-    headers = {
-        "Content-Type": "application/json"
-    }
-
     response = requests.post(
         url,
         json=payload,
-        headers=headers,
+        headers={"Content-Type": "application/json"},
         timeout=120
     )
 
@@ -86,14 +83,11 @@ def translate_text(
 
 
 # ------------------------------------------------------------
-# Hilfsfunktionen
+# Stabilitätserkennung
 # ------------------------------------------------------------
 
 def common_prefix(strings):
-    """
-    Ermittelt den längsten gemeinsamen Zeichenanfang
-    einer Liste von Strings.
-    """
+    """Ermittelt den längsten gemeinsamen Zeichenanfang."""
 
     if not strings:
         return ""
@@ -104,7 +98,10 @@ def common_prefix(strings):
         limit = min(len(prefix), len(text))
         index = 0
 
-        while index < limit and prefix[index] == text[index]:
+        while (
+            index < limit
+            and prefix[index] == text[index]
+        ):
             index += 1
 
         prefix = prefix[:index]
@@ -117,30 +114,22 @@ def common_prefix(strings):
 
 def find_stable_prefix(translations):
     """
-    Sucht einen stabilen Anfang in den letzten Übersetzungen.
+    Erkennt einen stabilen Anfang der deutschen Übersetzung.
 
-    Ein stabiler Anfang ist ein Textpräfix, das in allen
-    Übersetzungen des Stabilitätsfensters identisch ist.
-
-    Bevorzugt wird eine vollständige Satzgrenze.
-    Falls keine Satzgrenze existiert, wird ersatzweise
-    eine Wortgrenze verwendet.
-
-    Rückgabe:
-        stabiler Text oder leerer String
+    Es werden die letzten STABILITY_WINDOW Übersetzungen
+    miteinander verglichen.
     """
 
     if len(translations) < STABILITY_WINDOW:
         return ""
 
     recent = translations[-STABILITY_WINDOW:]
-
     prefix = common_prefix(recent)
 
     if len(prefix) < MIN_STABLE_LENGTH:
         return ""
 
-    # Bevorzugt an einer vollständigen Satzgrenze abschneiden.
+    # Bevorzugt vollständige Sätze.
     sentence_endings = [
         prefix.rfind("."),
         prefix.rfind("!"),
@@ -152,8 +141,7 @@ def find_stable_prefix(translations):
     if last_sentence_end >= MIN_STABLE_LENGTH - 1:
         return prefix[:last_sentence_end + 1].strip()
 
-    # Wenn noch kein vollständiger Satz vorliegt:
-    # ersatzweise an einer Wortgrenze abschneiden.
+    # Andernfalls an einer Wortgrenze abschneiden.
     last_space = prefix.rfind(" ")
 
     if last_space >= MIN_STABLE_LENGTH:
@@ -162,41 +150,179 @@ def find_stable_prefix(translations):
     return ""
 
 
-def remove_prefix(text, prefix):
+# ------------------------------------------------------------
+# Unscharfe Suche im Originalpuffer
+# ------------------------------------------------------------
+
+def tokenize_with_positions(text):
     """
-    Entfernt ein bekanntes Präfix aus einem String.
+    Zerlegt Text in Wörter und speichert deren Zeichenpositionen.
 
-    Diese Funktion wird nur auf die deutsche Übersetzung
-    angewendet, nicht auf den ursprünglichen sorbischen Text.
+    Die Positionen beziehen sich auf den Originaltext.
+    Satzzeichen bleiben dadurch im Originalpuffer erhalten.
     """
 
-    if not prefix:
-        return text
+    return [
+        (match.group(), match.start(), match.end())
+        for match in re.finditer(r"\w+", text, flags=re.UNICODE)
+    ]
 
-    if text.startswith(prefix):
-        return text[len(prefix):].lstrip()
 
-    # Normalerweise sollte das Präfix exakt übereinstimmen.
-    # Falls nicht, wird nichts entfernt.
-    print(
-        "WARNUNG: Der stabile Text ist kein exakter Anfang "
-        "der aktuellen Übersetzung."
+def normalize_word(word):
+    """Normalisiert ein Wort für den Vergleich."""
+
+    return word.casefold()
+
+
+def find_fuzzy_prefix(original, backtranslated):
+    """
+    Sucht einen möglichst passenden Anfang im Originalpuffer.
+
+    Verglichen wird die Rückübersetzung des stabilen deutschen
+    Abschnitts mit verschiedenen Wortpräfixen des Originals.
+
+    Rückgabe:
+        (entfernter_text, resttext, ähnlichkeit)
+
+    Wenn kein zuverlässiger Treffer gefunden wird:
+        ("", original, bester_score)
+
+    Es wird ausschließlich ein Präfix des Originalpuffers
+    entfernt. Text aus der Mitte oder vom Ende wird niemals
+    herausgeschnitten.
+    """
+
+    original_tokens = tokenize_with_positions(original)
+    translated_tokens = tokenize_with_positions(backtranslated)
+
+    original_words = [
+        normalize_word(token[0])
+        for token in original_tokens
+    ]
+
+    translated_words = [
+        normalize_word(token[0])
+        for token in translated_tokens
+    ]
+
+    print_section(
+        "Vergleich: Rückübersetzung (hsb)",
+        backtranslated
     )
 
-    return text
+    print("Wörter der Rückübersetzung:")
+    print(translated_words)
 
+    print("\nWörter im Originalpuffer:")
+    print(original_words)
+
+    # Ohne genügend Vergleichswörter ist eine zuverlässige
+    # unscharfe Suche schwierig.
+    if len(translated_words) < MIN_MATCH_WORDS:
+        print(
+            "\nZu wenige Wörter in der Rückübersetzung. "
+            "Der Originalpuffer bleibt unverändert."
+        )
+
+        return "", original, 0.0
+
+    if len(original_words) < MIN_MATCH_WORDS:
+        print(
+            "\nZu wenige Wörter im Originalpuffer. "
+            "Der Originalpuffer bleibt unverändert."
+        )
+
+        return "", original, 0.0
+
+    target_length = len(translated_words)
+
+    # Die gesuchte Originalspanne kann kürzer oder länger
+    # als die Rückübersetzung sein.
+    min_length = max(
+        MIN_MATCH_WORDS,
+        int(target_length * 0.5)
+    )
+
+    max_length = min(
+        len(original_words),
+        int(target_length * 1.8) + 3
+    )
+
+    best_score = 0.0
+    best_length = 0
+
+    print("\nKandidaten für den Originalpräfix:")
+
+    for candidate_length in range(
+        min_length,
+        max_length + 1
+    ):
+
+        candidate_words = original_words[:candidate_length]
+
+        # Zeichenfolge auf Wortebene vergleichen.
+        matcher = difflib.SequenceMatcher(
+            None,
+            translated_words,
+            candidate_words,
+            autojunk=False
+        )
+
+        similarity = matcher.ratio()
+
+        print(
+            f"  {candidate_length:3d} Wörter: "
+            f"Ähnlichkeit = {similarity:.3f}"
+        )
+
+        if similarity > best_score:
+            best_score = similarity
+            best_length = candidate_length
+
+    print(f"\nBeste Ähnlichkeit: {best_score:.3f}")
+    print(f"Beste Präfixlänge: {best_length} Wörter")
+    print(f"Erforderliche Ähnlichkeit: {MIN_MATCH_RATIO:.3f}")
+
+    # Konservativ entscheiden: Bei zu geringer Ähnlichkeit
+    # wird nichts entfernt.
+    if (
+        best_length == 0
+        or best_score < MIN_MATCH_RATIO
+    ):
+        print(
+            "\nKein ausreichend zuverlässiger Treffer. "
+            "Der Originalpuffer bleibt unverändert."
+        )
+
+        return "", original, best_score
+
+    # Ende des letzten erkannten Wortes im Originaltext.
+    cut_position = original_tokens[best_length - 1][2]
+
+    removed_text = original[:cut_position]
+    remaining_text = original[cut_position:].lstrip()
+
+    print_section(
+        "Gefundener Originalpräfix",
+        removed_text
+    )
+
+    print_section(
+        "Verbleibender Originaltext",
+        remaining_text
+    )
+
+    return removed_text, remaining_text, best_score
+
+
+# ------------------------------------------------------------
+# Ausgabe
+# ------------------------------------------------------------
 
 def print_section(title, text):
-    """
-    Gibt einen Verarbeitungsschritt übersichtlich aus.
-    """
-
-    print()
-    print("=" * 72)
     print(title)
-    print("-" * 72)
     print(text if text else "[leer]")
-    print("=" * 72)
+    print("-" * 3)
 
 
 # ------------------------------------------------------------
@@ -204,16 +330,6 @@ def print_section(title, text):
 # ------------------------------------------------------------
 
 def process_file(input_file, output_file):
-    """
-    Verarbeitet eine Textdatei zeilenweise.
-
-    Jede nichtleere Eingabezeile wird an den aktuellen
-    obersorbischen Eingabepuffer angehängt.
-
-    Sobald ein stabiler deutscher Textanfang erkannt wird,
-    wird der verbleibende deutsche Text zurückübersetzt
-    und als neuer obersorbischer Eingabepuffer verwendet.
-    """
 
     input_path = Path(input_file)
     output_path = Path(output_file)
@@ -223,42 +339,41 @@ def process_file(input_file, output_file):
             f"Eingabedatei nicht gefunden: {input_path}"
         )
 
-    # Aktueller, noch nicht abgeschlossener Eingabepuffer.
-    buffer_hsb = ""
-
-    # Übersetzungen seit dem letzten Commit.
-    translation_history = []
-
-    # Letzte gespeicherte deutsche Übersetzung.
-    stored_translation_de = ""
-
-    # Protokoll für die Ausgabedatei.
-    output_lines = []
-
-    # Statistiken.
-    segment_count = 0
-    commit_count = 0
-
     lines = input_path.read_text(
         encoding="utf-8"
     ).splitlines()
 
+    # Originalpuffer in Obersorbisch.
+    buffer_hsb = ""
+
+    # Übersetzungen seit dem letzten erfolgreichen Commit.
+    translation_history = []
+
+    # Protokoll.
+    output_lines = []
+
+    segment_count = 0
+    commit_count = 0
+
     print_section(
         "START",
-        f"Eingabedatei: {input_path}\n"
-        f"Ausgabedatei: {output_path}\n"
-        f"Anzahl Zeilen: {len(lines)}\n"
+        f"Eingabe: {input_path}\n"
+        f"Ausgabe: {output_path}\n"
+        f"Segmente: {len(lines)}\n"
         f"Sprachen: {SOURCE_LANG} -> {TARGET_LANG}\n"
         f"Stabilitätsfenster: {STABILITY_WINDOW}\n"
-        f"Mindestlänge: {MIN_STABLE_LENGTH}"
+        f"Mindestlänge stabiler Text: {MIN_STABLE_LENGTH}\n"
+        f"Mindestähnlichkeit: {MIN_MATCH_RATIO}"
     )
 
     for line_number, line in enumerate(lines, start=1):
 
-        # Leere Zeilen überspringen.
+        if STEPS:
+            input("Enter drücken für die nächste Zeile ...")
+
         if not line.strip():
             print(
-                f"\nZeile {line_number}: leer, wird übersprungen."
+                f"\nZeile {line_number}: leer, übersprungen."
             )
             continue
 
@@ -266,67 +381,57 @@ def process_file(input_file, output_file):
 
         print()
         print("#" * 72)
-        print(
-            f"SEGMENT {segment_count} "
-            f"(Dateizeile {line_number})"
-        )
+        print(f"SEGMENT {segment_count}")
         print("#" * 72)
 
         # ----------------------------------------------------
-        # Schritt 1: Eingabesegment akkumulieren
+        # 1. Originaltext akkumulieren
         # ----------------------------------------------------
 
         if buffer_hsb:
-            buffer_hsb = buffer_hsb.rstrip() + " " + line.strip()
+            buffer_hsb = (
+                buffer_hsb.rstrip()
+                + " "
+                + line.strip()
+            )
         else:
             buffer_hsb = line.strip()
 
         print_section(
-            "1. Akkumulierter String Sprache A (hsb)",
+            "HSB:",
             buffer_hsb
         )
 
         # ----------------------------------------------------
-        # Schritt 2: Gesamten Eingabepuffer übersetzen
+        # 2. Gesamten Originalpuffer übersetzen
         # ----------------------------------------------------
 
-        try:
-            translation_de = translate_text(
-                buffer_hsb,
-                SOURCE_LANG,
-                TARGET_LANG
-            )
-
-        except requests.RequestException as exc:
-            print(f"Übersetzungsfehler: {exc}")
-            print("Verarbeitung wird abgebrochen.")
-            raise
+        translation_de = translate_text(
+            buffer_hsb,
+            SOURCE_LANG,
+            TARGET_LANG
+        )
 
         print_section(
-            "2. Übersetzter String Sprache B (de)",
+            "HSB2DE:",
             translation_de
         )
 
         # ----------------------------------------------------
-        # Schritt 3: Übersetzung speichern
+        # 3. Übersetzung speichern
         # ----------------------------------------------------
-
-        stored_translation_de = translation_de
 
         translation_history.append(translation_de)
 
-        print_section(
-            "3. Gespeicherter String Sprache B (de)",
-            stored_translation_de
-        )
+        stored_translation_de = translation_de
 
-        print(
-            f"Anzahl gespeicherter Vergleichsübersetzungen: "
-            f"{len(translation_history)}"
-        )
+        #print_section(
+        #    "3. Gespeicherter String (de)",
+        #    stored_translation_de
+        #)
 
         # ----------------------------------------------------
-        # Schritt 4: Stabilen Anfang suchen
+        # 4. Stabilen deutschen Textanfang suchen
         # ----------------------------------------------------
 
         stable_prefix_de = find_stable_prefix(
@@ -336,17 +441,16 @@ def process_file(input_file, output_file):
         if not stable_prefix_de:
 
             print_section(
-                "4. Stabiler Teil",
-                "Noch kein ausreichend stabiler Textanfang "
-                "erkannt. Es wird weiter akkumuliert."
+                "DE-scanstable:",
+                "NONE"
             )
 
-            output_lines.append(
-                f"[Segment {segment_count}]\n"
-                f"Eingabe hsb: {buffer_hsb}\n"
-                f"Übersetzung de: {translation_de}\n"
-                f"Status: Noch kein stabiler Textanfang\n"
-            )
+            #output_lines.append(
+            #    f"[Segment {segment_count}]\n"
+            #    f"Original hsb: {buffer_hsb}\n"
+            #    f"Übersetzung de: {translation_de}\n"
+            #    f"Status: Noch nicht stabil\n"
+            #)
 
             if REQUEST_DELAY:
                 time.sleep(REQUEST_DELAY)
@@ -354,127 +458,107 @@ def process_file(input_file, output_file):
             continue
 
         print_section(
-            "4. Stabiler Teil Sprache B (de)",
+            "DE-final:",
             stable_prefix_de
         )
 
         # ----------------------------------------------------
-        # Schritt 5: Stabilen Teil zurückübersetzen
+        # 5. Stabilen deutschen Teil rückübersetzen
         # ----------------------------------------------------
 
-        try:
-            stable_prefix_hsb = translate_text(
-                stable_prefix_de,
-                TARGET_LANG,
-                SOURCE_LANG
-            )
-
-        except requests.RequestException as exc:
-            print(f"Rückübersetzungsfehler: {exc}")
-            print("Verarbeitung wird abgebrochen.")
-            raise
+        stable_prefix_hsb = translate_text(
+            stable_prefix_de,
+            TARGET_LANG,
+            SOURCE_LANG
+        )
 
         print_section(
-            "5. Rückübersetzung des stabilen Teils "
-            "(de -> hsb)",
+            "DE-final2HSB:",
             stable_prefix_hsb
         )
 
         # ----------------------------------------------------
-        # Schritt 6: Stabilen deutschen Teil entfernen
+        # 6. Rückübersetzung unscharf im Original suchen
         # ----------------------------------------------------
 
-        remaining_de = remove_prefix(
-            translation_de,
-            stable_prefix_de
+        removed_text, remaining_text, similarity = (
+            find_fuzzy_prefix(
+                buffer_hsb,
+                stable_prefix_hsb
+            )
         )
+
+        # ----------------------------------------------------
+        # 7. Originalpuffer reduzieren
+        # ----------------------------------------------------
 
         print_section(
-            "6. Verbleibender String Sprache B (de)",
-            remaining_de
+            "7. Reduzierung des Originalpuffers (hsb)",
+            f"Vorher:\n{buffer_hsb}\n\n"
+            f"Entfernter Teil:\n"
+            f"{removed_text or '[nichts entfernt]'}\n\n"
+            f"Nachher:\n{remaining_text}"
         )
 
-        # ----------------------------------------------------
-        # Schritt 7: Verbleibenden Text zurückübersetzen
-        #
-        # WICHTIG:
-        # Wir entfernen NICHT einfach Zeichen oder Wörter
-        # aus buffer_hsb. Die deutsche Übersetzung und der
-        # ursprüngliche sorbische Text können strukturell
-        # unterschiedlich sein.
-        #
-        # Stattdessen erzeugen wir einen neuen Eingabepuffer
-        # aus dem verbleibenden deutschen Text.
-        # ----------------------------------------------------
+        # Ohne erfolgreichen Treffer bleibt der Puffer
+        # erhalten und es wird kein Commit ausgeführt.
+        if not removed_text:
 
-        if remaining_de:
+            print(
+                "\nKein Commit: Der Originalpuffer wurde "
+                "nicht verändert. Die Suche wird bei "
+                "späteren Segmenten erneut versucht."
+            )
 
-            try:
-                new_buffer_hsb = translate_text(
-                    remaining_de,
-                    TARGET_LANG,
-                    SOURCE_LANG
-                )
+            #output_lines.append(
+            #    f"[Segment {segment_count}]\n"
+            #    f"Original hsb: {buffer_hsb}\n"
+            #    f"Übersetzung de: {translation_de}\n"
+            #    f"Stabiler Teil de: {stable_prefix_de}\n"
+            #    f"Rückübersetzung hsb: {stable_prefix_hsb}\n"
+            #    f"Ähnlichkeit: {similarity:.3f}\n"
+            #    f"Status: Kein zuverlässiger Treffer\n"
+            #)
 
-            except requests.RequestException as exc:
-                print(f"Übersetzungsfehler: {exc}")
-                print("Verarbeitung wird abgebrochen.")
-                raise
+            if REQUEST_DELAY:
+                time.sleep(REQUEST_DELAY)
 
-        else:
-            new_buffer_hsb = ""
+            continue
 
-        print_section(
-            "7. Rückübersetzung des verbleibenden Textes "
-            "(de -> hsb)",
-            new_buffer_hsb
-        )
-
-        # ----------------------------------------------------
-        # Schritt 8: Eingabepuffer reduzieren
-        # ----------------------------------------------------
-
+        # Erst bei erfolgreicher Zuordnung wird der Puffer
+        # tatsächlich gekürzt.
         old_buffer_hsb = buffer_hsb
-
-        buffer_hsb = new_buffer_hsb
-
-        print_section(
-            "8. Reduzierung des Eingangsstrings Sprache A",
-            f"Vorher:\n{old_buffer_hsb}\n\n"
-            f"Nachher:\n{buffer_hsb}"
-        )
-
-        print(
-            "\nHinweis: Der neue Eingabepuffer ist eine "
-            "Rückübersetzung des verbleibenden deutschen "
-            "Textes und nicht notwendigerweise eine "
-            "wortgetreue Restmenge des Originals."
-        )
-
-        # ----------------------------------------------------
-        # Schritt 9: Verarbeitung protokollieren
-        # ----------------------------------------------------
+        buffer_hsb = remaining_text
 
         commit_count += 1
 
-        output_lines.append(
-            f"[Commit {commit_count}]\n"
-            f"Stabiler Teil de: {stable_prefix_de}\n"
-            f"Rückübersetzung hsb: {stable_prefix_hsb}\n"
-            f"Verbleibender Text de: {remaining_de}\n"
-            f"Neuer Eingabepuffer hsb: {buffer_hsb}\n"
+        print_section(
+            "HSB-new:",
+            buffer_hsb
         )
 
-        # Nach einem Commit beginnt die Stabilitätserkennung
-        # für den neuen Eingabepuffer von vorn.
+        # Stabilen deutschen Abschnitt dauerhaft protokollieren.
+        #output_lines.append(
+        #    f"[Commit {commit_count}]\n"
+        #    f"Stabiler Text de: {stable_prefix_de}\n"
+        #    f"Rückübersetzung hsb: {stable_prefix_hsb}\n"
+        #    f"Entfernter Originaltext hsb: {removed_text}\n"
+        #    f"Ähnlichkeit: {similarity:.3f}\n"
+        #    f"Originalpuffer vorher: {old_buffer_hsb}\n"
+        #    f"Originalpuffer nachher: {buffer_hsb}\n"
+        #)
+        output_lines.append(f"{stable_prefix_de}\n")
+
+        # Die Historie wird nach erfolgreicher Kürzung
+        # zurückgesetzt, da nun ein neuer Textanfang vorliegt.
         translation_history.clear()
 
-        print_section(
-            "9. Status nach dem Commit",
-            f"Commit-Nummer: {commit_count}\n"
-            f"Neuer Eingabepuffer: {buffer_hsb}\n"
-            f"Vergleichshistorie zurückgesetzt."
-        )
+        #print_section(
+        #    "9. Status nach erfolgreichem Commit",
+        #    f"Commit: {commit_count}\n"
+        #    f"Verbleibender Originalpuffer: {buffer_hsb}\n"
+        #    f"Übersetzungshistorie zurückgesetzt."
+        #)
 
         if REQUEST_DELAY:
             time.sleep(REQUEST_DELAY)
@@ -484,50 +568,37 @@ def process_file(input_file, output_file):
     # --------------------------------------------------------
 
     print_section(
-        "ABSCHLUSS: Verbleibender Eingabepuffer",
+        "ABSCHLUSS: Verbleibender Originalpuffer (hsb)",
         buffer_hsb
     )
 
-    # Den verbleibenden Text nach Möglichkeit noch einmal
-    # übersetzen, damit auch der letzte Rest ausgegeben wird.
     if buffer_hsb.strip():
 
-        try:
-            final_translation_de = translate_text(
-                buffer_hsb,
-                SOURCE_LANG,
-                TARGET_LANG
-            )
-
-            print_section(
-                "ABSCHLUSS: Letzte Übersetzung nach Deutsch",
-                final_translation_de
-            )
-
-            output_lines.append(
-                "[Abschluss]\n"
-                f"Verbleibender Text hsb: {buffer_hsb}\n"
-                f"Letzte Übersetzung de: {final_translation_de}\n"
-            )
-
-        except requests.RequestException as exc:
-            print(
-                "WARNUNG: Der verbleibende Text konnte "
-                f"nicht abschließend übersetzt werden: {exc}"
-            )
-
-            output_lines.append(
-                "[Abschluss: Übersetzungsfehler]\n"
-                f"Verbleibender Text hsb: {buffer_hsb}\n"
-            )
-
-    else:
-        output_lines.append(
-            "[Abschluss]\n"
-            "Kein verbleibender Eingabetext.\n"
+        final_translation_de = translate_text(
+            buffer_hsb,
+            SOURCE_LANG,
+            TARGET_LANG
         )
 
-    # Ergebnisprotokoll schreiben.
+        print_section(
+            "ABSCHLUSS: Übersetzung des verbleibenden Textes",
+            final_translation_de
+        )
+
+        #output_lines.append(
+        #    "[Abschluss]\n"
+        #    f"Verbleibender Originaltext hsb: {buffer_hsb}\n"
+        #    f"Übersetzung de: {final_translation_de}\n"
+        #)
+        output_lines.append(f"{final_translation_de}\n")
+
+
+    #else:
+        #output_lines.append(
+        #    "[Abschluss]\n"
+        #    "Kein verbleibender Originaltext.\n"
+        #)
+
     output_path.write_text(
         "\n".join(output_lines),
         encoding="utf-8"
@@ -536,7 +607,7 @@ def process_file(input_file, output_file):
     print_section(
         "FERTIG",
         f"Verarbeitete Segmente: {segment_count}\n"
-        f"Erkannte stabile Abschnitte: {commit_count}\n"
+        f"Erfolgreiche Commits: {commit_count}\n"
         f"Ergebnisdatei: {output_path}"
     )
 
@@ -546,10 +617,12 @@ def process_file(input_file, output_file):
 # ------------------------------------------------------------
 
 def main():
+
     parser = argparse.ArgumentParser(
         description=(
             "Inkrementelle Übersetzung von Obersorbisch "
-            "nach Deutsch mit Stabilitätserkennung."
+            "nach Deutsch mit unscharfer Entfernung "
+            "stabiler Textanfänge."
         )
     )
 
@@ -562,10 +635,7 @@ def main():
         "-o",
         "--output",
         default="uebersetzungsprotokoll.txt",
-        help=(
-            "Ausgabedatei für das Protokoll "
-            "(Standard: uebersetzungsprotokoll.txt)"
-        )
+        help="Ausgabedatei für das Protokoll"
     )
 
     args = parser.parse_args()
